@@ -1,232 +1,133 @@
-import { Box } from '../../elements/LayoutPrimitives'
+import { Box, VStack } from '../../elements/LayoutPrimitives'
 import { useMemo } from 'react'
-import { LIBRARY_LEFT_MENU_WIDTH } from './LibraryFilterMenu'
-import { LayoutType } from './HomeFeedContainer'
 import { SuggestionBox, SuggestionAction } from '../../elements/SuggestionBox'
+import { DEFAULT_HEADER_HEIGHT } from './HeaderSpacer'
+import { EmptyLibraryIcon } from '../../elements/icons/EmptyLibraryNotes'
+import { EmptyHighlightsIcon } from '../../elements/icons/EmptyHighlightsIcon'
+import { EmptyTrashIcon } from '../../elements/icons/EmptyTrashIcon'
+import { useGetSubscriptions } from '../../../lib/networking/subscriptions/useGetSubscriptions'
 
 type EmptyLibraryProps = {
-  searchTerm: string | undefined
-  onAddLinkClicked: () => void
-
-  layoutType: LayoutType
+  folder: string | undefined
+  onAddLinkClicked?: () => void | undefined
 }
 
-type MessageType =
-  | 'inbox'
-  | 'continue'
-  | 'non-feed'
-  | 'highlight'
-  | 'unlabeled'
-  | 'files'
-  | 'archive'
-  | 'feed'
-  | 'subscription'
-  | 'newsletter'
-  | 'library'
-
-type HelpMessageProps = {
-  type: MessageType
+const Icon = (props: EmptyLibraryProps) => {
+  console.log('empty icon:', props.folder)
+  switch (props.folder) {
+    case 'highlights':
+      return <EmptyHighlightsIcon />
+    case 'trash':
+      return <EmptyTrashIcon />
+    default:
+      return <EmptyLibraryIcon />
+  }
 }
 
-export const ErrorBox = (props: HelpMessageProps) => {
-  const errorTitle = useMemo(() => {
-    switch (props.type) {
-      case 'inbox':
-        return 'Your inbox is empty. The inbox will contain all your non-archived saved items.'
-      case 'continue':
-        return "No continue reading items. Continue Reading items are items you have started but haven't finished reading."
-      case 'non-feed':
-        return "No non-feed items found. Non-feed items are items you've add to the library using the mobile apps, browser extensions, or Add Link button. Not newsletter or feed items."
-      case 'highlight':
-        return 'No highlights found. Add highlights to your library by highlighting text in the reader view.'
-      case 'unlabeled':
-        return 'No unlabeled items found. Items without labels can be found here. Use this query to easily triage your library.'
+const Title = (props: EmptyLibraryProps) => {
+  // If its the subscriptions folder we fetch the subscriptions
+  // to prevent a better message
+  const { data: subscriptions, isLoading } = useGetSubscriptions(
+    {},
+    props.folder == 'subscriptions'
+  )
+
+  const titleText = (folder: string | undefined) => {
+    switch (folder) {
+      case 'highlights':
+        return 'You do not have any highlights yet.'
+      case 'trash':
+        return 'Your trash is empty.'
       case 'archive':
         return 'You do not have any archived items.'
-      case 'files':
-        return 'No files found.'
-      case 'feed':
-        return 'You do not have any feed items matching this query.'
-      case 'subscription':
+      case 'following':
+        if (isLoading || (subscriptions?.length ?? 0) > 0) {
+          return 'No subscription items found.'
+        }
         return 'You do not have any subscriptions.'
-      case 'newsletter':
-        return 'You do not have any newsletter items matching this query.'
+      case 'home':
+        return 'Your homepage is empty.'
     }
-    return 'No results found for this query.'
-  }, [props.type])
-
+    return 'No results found.'
+  }
   return (
     <Box
       css={{
-        width: 'fit-content',
-        borderRadius: '5px',
-        background: 'rgba(255, 59, 48, 0.3)',
-        fontSize: '15px',
+        display: 'flex',
+        marginBlockStart: '0px',
+        marginBlockEnd: '10px',
+        lineHeight: '125%',
+        fontSize: '23px',
         fontFamily: '$inter',
-        fontWeight: '500',
-        color: '$thTextContrast',
-        py: '10px',
-        px: '15px',
-        '@smDown': {
-          width: '100%',
-        },
-        '@xlgDown': {
-          justifyContent: 'flex-start',
-        },
+        fontWeight: 'bold',
+        textAlign: 'center',
       }}
     >
-      {errorTitle}
+      {titleText(props.folder)}
     </Box>
   )
 }
 
-type SuggestionMessage = {
-  message: string
-  actions: SuggestionAction[]
-}
-
-export const Suggestion = (props: HelpMessageProps) => {
-  const helpMessage = useMemo<SuggestionMessage>(() => {
-    switch (props.type) {
-      case 'feed':
-        return {
-          message: 'Want to add an RSS or Atom Subscription?',
-          actions: [
-            { text: 'Add an RSS or Atom feed', url: '/settings/feeds' },
-          ],
-        }
+const Subtitle = (props: EmptyLibraryProps) => {
+  // If its the subscriptions folder we fetch the subscriptions
+  // to prevent a better message
+  const { data: subscriptions, isLoading } = useGetSubscriptions(
+    {},
+    props.folder == 'subscriptions'
+  )
+  const titleText = (folder: string | undefined) => {
+    switch (folder) {
+      case 'home':
+        return 'All your newly saved items and subscriptions will appear in your home section.'
+      case 'inbox':
+        return 'Items you have saved using the mobile apps and browser extensions, along with subscriptions you have moved into your library will appear here'
+      case 'highlights':
+        return 'Highlight text while reading to start building your highlights library.'
+      case 'trash':
+        return 'Deleted items will appear here before they are permanently deleted.'
       case 'archive':
-        return {
-          message:
-            'When you are done reading something archive it and it will be saved in Omnivore forever.',
-          actions: [
-            {
-              text: 'Read the docs',
-              url: 'https://docs.omnivore.app/using/saving',
-            },
-          ],
+        return 'Archived items are hidden from your library but saved forever. You can always access them here.'
+      case 'following':
+        if (isLoading || (subscriptions?.length ?? 0) > 0) {
+          return 'No subscription items found.'
         }
-      case 'files':
-        return {
-          message:
-            'Drag PDFs into the library to add them to your Omnivore account.',
-          actions: [],
-        }
-      case 'newsletter':
-        return {
-          message:
-            'Create an Omnivore email address and subscribe to newsletters.',
-          actions: [
-            {
-              text: 'Create an email address for newsletters',
-              url: '/settings/emails',
-            },
-          ],
-        }
-      case 'subscription':
-        return {
-          message:
-            'Create an Omnivore email address and subscribe to newsletters or add a feed from the Feeds page.',
-          actions: [
-            { text: 'Add an RSS or Atom feed', url: '/settings/feeds' },
-            {
-              text: 'Create an email address for newsletters',
-              url: '/settings/emails',
-            },
-          ],
-        }
+        return 'Get started by subscribing to newsletters or feeds from the settings menu.'
     }
-    return {
-      message: "Add a link or read more about Omnivore's Advanced Search.",
-      actions: [
-        {
-          text: 'Read the Docs',
-          url: 'https://docs.omnivore.app/using/search.html',
-        },
-      ],
-    }
-  }, [props.type])
-
+    return 'No results found.'
+  }
   return (
-    <>
-      {helpMessage ? (
-        <SuggestionBox
-          helpMessage={helpMessage.message}
-          suggestions={helpMessage.actions}
-        />
-      ) : (
-        <></>
-      )}
-    </>
+    <Box
+      css={{
+        fontSize: '17px',
+        fontFamily: '$inter',
+        color: '$thNotebookSubtle',
+        textAlign: 'center',
+      }}
+    >
+      {titleText(props.folder)}
+    </Box>
   )
 }
 
 export const EmptyLibrary = (props: EmptyLibraryProps) => {
-  const type = useMemo<MessageType>(() => {
-    if (props.searchTerm) {
-      switch (props.searchTerm) {
-        case 'in:inbox':
-          return 'inbox'
-        case 'in:inbox sort:read-desc is:reading':
-          return 'continue'
-        case 'no:subscription':
-          return 'non-feed'
-        // Handle both cases while we migrate
-        case 'has:highlights mode:highlights':
-        case 'in:all has:highlights mode:highlights':
-          return 'highlight'
-        case 'no:label':
-          return 'unlabeled'
-        case 'type:file':
-          return 'files'
-        case 'in:archive':
-          return 'archive'
-        case 'label:RSS':
-          return 'feed'
-        case 'has:subscriptions':
-          return 'subscription'
-        case 'label:Newsletter':
-          return 'newsletter'
-      }
-    }
-    return 'library'
-  }, [props])
-
   return (
-    <Box
+    <VStack
+      alignment="center"
+      distribution="center"
       css={{
-        display: 'inline-flex',
-        color: '$grayTextContrast',
-        gap: '10px',
-        pl: '0px',
-
+        gap: '5px',
         width: '100%',
-        flexDirection: 'column',
-
-        '@media (max-width: 768px)': {
-          p: '15px',
-        },
-
-        '@media (min-width: 768px)': {
-          pl: '15px',
-          width: `calc(100vw - ${LIBRARY_LEFT_MENU_WIDTH})`,
-        },
-        '@media (min-width: 930px)': {
-          pl: '0px',
-          width: props.layoutType == 'GRID_LAYOUT' ? '660px' : '640px',
-        },
-        '@media (min-width: 1280px)': {
-          pl: '0px',
-          width: '1000px',
-        },
-        '@media (min-width: 1600px)': {
-          pl: '0px',
-          width: '1340px',
-        },
+        height: '100%',
+        pb: '100px',
+        px: '25px',
+        maxWidth: '520px',
+        color: '$thLibraryMenuSecondary',
+        minHeight: `calc(100vh - ${DEFAULT_HEADER_HEIGHT})`,
       }}
     >
-      <ErrorBox type={type} />
-      <Suggestion type={type} />
-    </Box>
+      <Icon {...props} />
+      <Title {...props} />
+      <Subtitle {...props} />
+    </VStack>
   )
 }

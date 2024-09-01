@@ -203,10 +203,13 @@ Readability.prototype = {
     // Readability-readerable.js. Please keep both copies in sync.
     articleNegativeLookBehindCandidates: /breadcrumbs|breadcrumb|utils|trilist|_header/i,
     articleNegativeLookAheadCandidates: /outstream(.?)_|sub(.?)_|m_|omeda-promo-|in-article-advert|block-ad-.*|tl_/i,
-    unlikelyCandidates: /\bad\b|ai2html|banner|breadcrumbs|breadcrumb|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager(?!ow)|popup|yom-remote|copyright|keywords|outline|infinite-list|beta|recirculation|site-index|hide-for-print|post-end-share-cta|post-end-cta-full|post-footer|post-head|post-tag|li-date|main-navigation|programtic-ads|outstream_article|hfeed|comment-holder|back-to-top|show-up-next|onward-journey|topic-tracker|list-nav|block-ad-entity|adSpecs|gift-article-button|modal-title|in-story-masthead|share-tools|standard-dock|expanded-dock|margins-h|subscribe-dialog|icon|bumped|dvz-social-media-buttons|post-toc|mobile-menu|mobile-navbar|tl_article_header|mvp(-post)*-(add-story|soc(-mob)*-wrap)|w-condition-invisible|rich-text-block main w-richtext|rich-text-block_ataglance at-a-glance test w-richtext|PostsPage-commentsSection|hide-text/i,
+    unlikelyCandidates: /\bad\b|ai2html|banner|breadcrumbs|breadcrumb|combx|comment|community|cover-wrap|disqus|extra|footer|gdpr|header|legends|menu|related|remark|replies|rss|shoutbox|sidebar|skyscraper|social|sponsor|supplemental|ad-break|agegate|pagination|pager(?!ow)|popup|yom-remote|copyright|keywords|outline|infinite-list|beta|recirculation|site-index|hide-for-print|post-end-share-cta|post-end-cta-full|post-footer|post-head|post-tag|li-date|main-navigation|programtic-ads|outstream_article|hfeed|comment-holder|back-to-top|show-up-next|onward-journey|topic-tracker|list-nav|block-ad-entity|adSpecs|gift-article-button|modal-title|in-story-masthead|share-tools|standard-dock|expanded-dock|margins-h|subscribe-dialog|icon|bumped|dvz-social-media-buttons|post-toc|mobile-menu|mobile-navbar|tl_article_header|mvp(-post)*-(add-story|soc(-mob)*-wrap)|w-condition-invisible|rich-text-block main w-richtext|rich-text-block_ataglance at-a-glance test w-richtext|PostsPage-commentsSection|hide-text|text-blurple|bottom-wrapper/i,
     // okMaybeItsACandidate: /and|article(?!-breadcrumb)|body|column|content|main|shadow|post-header/i,
     get okMaybeItsACandidate() {
-      return new RegExp(`and|(?<!${this.articleNegativeLookAheadCandidates.source})article(?!-(${this.articleNegativeLookBehindCandidates.source}))|body|column|content|^(?!main-navigation|main-header)main|shadow|post-header|hfeed site|blog-posts hfeed|container-banners|menu-opacity|header-with-anchor-widget|commentOnSelection`, 'i')
+      return new RegExp(
+        `and|(?<!${this.articleNegativeLookAheadCandidates.source})article(?!-(${this.articleNegativeLookBehindCandidates.source}))|body|column|content|^(?!main-navigation|main-header)main|shadow|post-header|hfeed site|blog-posts hfeed|container-banners|menu-opacity|header-with-anchor-widget|commentOnSelection|highlight--with-header|header-anchor-post`,
+        'i'
+      )
     },
 
     positive: /article|body|content|entry|hentry|h-entry|main|page|pagination|post|text|blog|story|tweet(-\w+)?|instagram|image|container-banners|player|commentOnSelection/i,
@@ -261,9 +264,9 @@ Readability.prototype = {
     "SUP", "TEXTAREA", "TIME", "VAR", "WBR"
   ],
 
-  // These are the classes that readability sets itself.
+  // These are the classes that we want to keep.
   CLASSES_TO_PRESERVE: [
-    "page", "twitter-tweet", "tweet-placeholder", "instagram-placeholder", "morning-brew-markets", "prism-code"
+    "page", "twitter-tweet", "tweet-placeholder", "instagram-placeholder", "morning-brew-markets", "prism-code", "tiktok-embed"
   ],
 
   // Classes of placeholder elements that can be empty but shouldn't be removed
@@ -300,7 +303,7 @@ Readability.prototype = {
 
     if (!this._keepClasses) {
       // Remove classes.
-      this._cleanClasses(articleContent);
+      this._cleanElement(articleContent);
     }
   },
 
@@ -453,7 +456,7 @@ Readability.prototype = {
    * @param Element
    * @return void
    */
-  _cleanClasses: function (node) {
+  _cleanElement: function (node) {
     if (node.className && node.className.startsWith && node.className.startsWith('_omnivore')) {
       return;
     }
@@ -480,8 +483,10 @@ Readability.prototype = {
       node.removeAttribute("class");
     }
 
+    this._removeAllEventHandlers(node)
+
     for (node = node.firstElementChild; node; node = node.nextElementSibling) {
-      this._cleanClasses(node);
+      this._cleanElement(node);
     }
   },
 
@@ -543,7 +548,6 @@ Readability.prototype = {
     this._forEachNode(medias, function (media) {
       var src = media.getAttribute("src");
       var poster = media.getAttribute("poster");
-      var srcset = media.getAttribute("srcset");
 
       if (src) {
         media.setAttribute("src", this.toAbsoluteURI(src));
@@ -553,6 +557,20 @@ Readability.prototype = {
         media.setAttribute("poster", this.toAbsoluteURI(poster));
       }
     });
+  },
+
+  // removes all the javascript event handlers from the supplied element
+  _removeAllEventHandlers(element) {
+    const attributes = element.attributes;
+
+    // Iterate in reverse because removing attributes changes the length
+    for (let i = attributes.length - 1; i >= 0; i--) {
+        const attribute = attributes[i];
+        // Check if the attribute starts with "on" (like "onload", "onerror", etc.)
+        if (attribute.name.startsWith('on')) {
+            element.removeAttribute(attribute.name);
+        }
+    }
   },
 
   /** Creates imageproxy links for all article images with href source */
@@ -1917,7 +1935,8 @@ Readability.prototype = {
     var metaElements = this._doc.getElementsByTagName("meta");
 
     // property is a space-separated list of values
-    var propertyPattern = /\s*(dc|dcterm|og|twitter|article)\s*:\s*(locale|author|creator|description|title|site_name|published_time|published|date|image)\s*/gi;
+    var propertyPattern =
+      /\s*(dc|dcterm|og|twitter|article)\s*:\s*(locale|author|creator|description|title|site_name|published_time|published|date|image(?:$|\s|:url|:secure_url))\s*/gi;
 
     // name is a single value
     var namePattern = /^\s*(?:(dc|dcterm|og|twitter|weibo:(article|webpage))\s*[\.:]\s*)?(author|creator|description|title|site_name|date|image)\s*$/i;
@@ -2003,6 +2022,7 @@ Readability.prototype = {
     metadata.byline = jsonld.byline ||
       values["dc:creator"] ||
       values["dcterm:creator"] ||
+      values["og:article:author"] ||
       values["author"];
 
     // get description
@@ -2049,14 +2069,14 @@ Readability.prototype = {
       values["article:date"];
 
     // get preview image
-    metadata.previewImage = jsonld.previewImage ||
-      values["image"] ||
+    metadata.previewImage = values["image"] ||
       values["twitter:image"] ||
       values["dc:image"] ||
       values["dcterm:image"] ||
       values["og:image"] ||
       values["weibo:article:image"] ||
-      values["weibo:webpage:image"];
+      values["weibo:webpage:image"] || 
+      jsonld.previewImage;
 
     metadata.locale = values["og:locale"];
 
@@ -3036,16 +3056,16 @@ Readability.prototype = {
 
       // detect language from the html content
       const languages = (await cld.detect(content, { isHTML: true })).languages;
-      console.log('Detected languages: ', languages);
+      this.log('Detected languages: ', languages);
       if (languages.length > 0) {
         code = languages[0].code;
       }
 
-      console.log('Getting language name from code: ', code);
+      this.log('Getting language name from code: ', code);
       let lang = new Intl.DisplayNames(['en'], {type: 'language'});
       return lang.of(code);
     } catch (error) {
-      console.error('Failed to get language', error);
+      this.log('Failed to get language', error);
       return 'English';
     }
   },
@@ -3100,13 +3120,18 @@ Readability.prototype = {
     this._postProcessContent(articleContent);
 
     // If we haven't found an excerpt in the article's metadata, use the article's
-    // first paragraph as the excerpt. This is used for displaying a preview of
+    // first meaningful paragraph (more than 50 characters) as the excerpt. This is used for displaying a preview of
     // the article's content.
     if (!metadata.excerpt) {
       var paragraphs = articleContent.getElementsByTagName("p");
-      if (paragraphs.length > 0) {
-        metadata.excerpt = paragraphs[0].textContent.trim();
-      }
+      for (const p of paragraphs) {
+        const text = p.textContent.trim();
+
+        if (text.length > 50) {
+          metadata.excerpt = text;
+          break;
+        }
+      };
     }
     if (!metadata.siteName) {
       // Fallback to hostname
@@ -3135,6 +3160,7 @@ Readability.prototype = {
       previewImage: metadata.previewImage,
       publishedDate,
       language,
+      documentElement: articleContent,
     };
   }
 };

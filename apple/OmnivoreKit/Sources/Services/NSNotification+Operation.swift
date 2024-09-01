@@ -3,10 +3,8 @@ import Foundation
 import Models
 
 public extension NSNotification {
-  static let PushJSONArticle = Notification.Name("PushJSONArticle")
-  static let PushReaderItem = Notification.Name("PushReaderItem")
-  static let LibrarySnackBar = Notification.Name("LibrarySnackBar")
-  static let ReaderSnackBar = Notification.Name("ReaderSnackBar")
+  static let PushLibraryItem = Notification.Name("PushLibraryItem")
+  static let SnackBar = Notification.Name("SnackBar")
   static let OperationFailure = Notification.Name("OperationFailure")
   static let ReaderSettingsChanged = Notification.Name("ReaderSettingsChanged")
   static let SpeakingReaderItem = Notification.Name("SpeakingReaderItem")
@@ -20,19 +18,11 @@ public extension NSNotification {
   }
 
   static var pushFeedItemPublisher: NotificationCenter.Publisher {
-    NotificationCenter.default.publisher(for: PushJSONArticle)
+    NotificationCenter.default.publisher(for: PushLibraryItem)
   }
 
-  static var pushReaderItemPublisher: NotificationCenter.Publisher {
-    NotificationCenter.default.publisher(for: PushReaderItem)
-  }
-
-  static var readerSnackBarPublisher: NotificationCenter.Publisher {
-    NotificationCenter.default.publisher(for: ReaderSnackBar)
-  }
-
-  static var librarySnackBarPublisher: NotificationCenter.Publisher {
-    NotificationCenter.default.publisher(for: LibrarySnackBar)
+  static var snackBarPublisher: NotificationCenter.Publisher {
+    NotificationCenter.default.publisher(for: SnackBar)
   }
 
   static var operationFailedPublisher: NotificationCenter.Publisher {
@@ -66,26 +56,23 @@ public extension NSNotification {
     return nil
   }
 
-  static func pushJSONArticle(article: JSONArticle) {
+  static func pushLibraryItem(folder: String?, libraryItemId: String) {
     NotificationCenter.default.post(
-      name: NSNotification.PushJSONArticle,
+      name: NSNotification.PushLibraryItem,
       object: nil,
-      userInfo: ["article": article]
+      userInfo: [
+        "folder": folder ?? "inbox",
+        "libraryItemId": libraryItemId
+      ]
     )
   }
 
-  static func pushReaderItem(objectID: NSManagedObjectID) {
-    NotificationCenter.default.post(
-      name: NSNotification.PushReaderItem,
-      object: nil,
-      userInfo: ["objectID": objectID]
-    )
-  }
-
-  static func librarySnackBar(message: String, undoAction: (() -> Void)?) {
-    NotificationCenter.default.post(name: NSNotification.LibrarySnackBar,
+  static func snackBar(message: String, undoAction: (() -> Void)?, dismissAfter: Int?) {
+    NotificationCenter.default.post(name: NSNotification.SnackBar,
                                     object: nil,
-                                    userInfo: ["message": message, "undoAction": undoAction as Any])
+                                    userInfo: ["message": message, 
+                                               "undoAction": undoAction as Any,
+                                               "dismissAfter": dismissAfter as Any])
   }
 
   static func operationFailed(message: String) {

@@ -23,6 +23,7 @@ export enum StatusType {
   Active = 'ACTIVE',
   Pending = 'PENDING',
   Deleted = 'DELETED',
+  Archived = 'ARCHIVED',
 }
 
 @Entity()
@@ -73,5 +74,5 @@ export class User {
     () => UserPersonalization,
     (userPersonalization) => userPersonalization.user
   )
-  userPersonalization!: UserPersonalization
+  userPersonalization?: UserPersonalization
 }

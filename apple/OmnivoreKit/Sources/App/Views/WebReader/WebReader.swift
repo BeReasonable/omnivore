@@ -11,6 +11,7 @@ struct WebReader: PlatformViewRepresentable {
   let articleContent: ArticleContent
   let openLinkAction: (URL) -> Void
   let tapHandler: () -> Void
+  let explainHandler: ((String) -> Void)?
   let scrollPercentHandler: (Int) -> Void
   let webViewActionHandler: (WKScriptMessage, WKScriptMessageReplyHandler?) -> Void
   let navBarVisibilityUpdater: (Bool) -> Void
@@ -20,6 +21,7 @@ struct WebReader: PlatformViewRepresentable {
   @Binding var showNavBarActionID: UUID?
   @Binding var shareActionID: UUID?
   @Binding var annotation: String
+  @Binding var showBottomBar: Bool
   @Binding var showHighlightAnnotationModal: Bool
 
   func makeCoordinator() -> WebReaderCoordinator {
@@ -50,6 +52,7 @@ struct WebReader: PlatformViewRepresentable {
     let contentController = WKUserContentController()
 
     webView.tapHandler = tapHandler
+    webView.explainHandler = explainHandler
     webView.navigationDelegate = context.coordinator
     webView.configuration.userContentController = contentController
     webView.configuration.userContentController.removeAllScriptMessageHandlers()
@@ -64,6 +67,10 @@ struct WebReader: PlatformViewRepresentable {
       webView.scrollView.contentInset.top = readerViewNavBarHeight
       webView.scrollView.verticalScrollIndicatorInsets.top = readerViewNavBarHeight
       webView.configuration.userContentController.add(webView, name: "viewerAction")
+
+      if #available(iOS 15.4, *) {
+        webView.configuration.preferences.isElementFullscreenEnabled = true
+      }
 
       webView.scrollView.indicatorStyle = ThemeManager.currentTheme.isDark ?
         UIScrollView.IndicatorStyle.white :
@@ -90,6 +97,9 @@ struct WebReader: PlatformViewRepresentable {
     context.coordinator.webViewActionHandler = webViewActionHandler
     context.coordinator.updateNavBarVisibility = navBarVisibilityUpdater
     context.coordinator.scrollPercentHandler = scrollPercentHandler
+    context.coordinator.updateShowBottomBar = { newValue in
+      self.showBottomBar = newValue
+    }
 
     context.coordinator.articleContentID = articleContent.id
     loadContent(webView: webView)
@@ -103,7 +113,7 @@ struct WebReader: PlatformViewRepresentable {
       do {
         try (webView as? OmnivoreWebView)?.dispatchEvent(.saveAnnotation(annotation: annotation))
       } catch {
-        showInLibrarySnackbar("Error saving note.")
+        Snackbar.show(message: "Error saving note.", dismissAfter: 2000)
       }
     }
 

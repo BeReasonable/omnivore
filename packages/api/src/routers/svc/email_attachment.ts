@@ -1,15 +1,13 @@
 import express from 'express'
-import { DeepPartial } from 'typeorm'
-import {
-  ContentReaderType,
-  LibraryItem,
-  LibraryItemState,
-} from '../../entity/library_item'
+import { ContentReaderType, LibraryItemState } from '../../entity/library_item'
 import { UploadFile } from '../../entity/upload_file'
 import { env } from '../../env'
 import { PageType, UploadFileStatus } from '../../generated/graphql'
 import { authTrx } from '../../repository'
-import { createLibraryItem } from '../../services/library_item'
+import {
+  createOrUpdateLibraryItem,
+  CreateOrUpdateLibraryItemArgs,
+} from '../../services/library_item'
 import { findNewsletterEmailByAddress } from '../../services/newsletters'
 import { updateReceivedEmail } from '../../services/received_emails'
 import {
@@ -51,8 +49,8 @@ export function emailAttachmentRouter() {
 
     const user = newsletterEmail.user
 
-    analytics.track({
-      userId: user.id,
+    analytics.capture({
+      distinctId: user.id,
       event: 'email_attachment_upload',
       properties: {
         env: env.server.apiEnv,
@@ -69,8 +67,9 @@ export function emailAttachmentRouter() {
             contentType,
             user: { id: user.id },
           }),
-        undefined,
-        user.id
+        {
+          uid: user.id,
+        }
       )
 
       if (uploadFileData.id) {
@@ -118,8 +117,8 @@ export function emailAttachmentRouter() {
 
     const user = newsletterEmail.user
 
-    analytics.track({
-      userId: user.id,
+    analytics.capture({
+      distinctId: user.id,
       event: 'email_attachment_create_article',
       properties: {
         env: env.server.apiEnv,
@@ -154,7 +153,7 @@ export function emailAttachmentRouter() {
           ? PageType.File
           : PageType.Book
       const title = subject || uploadFileData.fileName
-      const itemToCreate: DeepPartial<LibraryItem> = {
+      const itemToCreate: CreateOrUpdateLibraryItemArgs = {
         originalUrl: uploadFileUrlOverride,
         itemType,
         textContentHash: uploadFileHash,
@@ -170,7 +169,7 @@ export function emailAttachmentRouter() {
             : ContentReaderType.EPUB,
       }
 
-      const item = await createLibraryItem(itemToCreate, user.id)
+      const item = await createOrUpdateLibraryItem(itemToCreate, user.id)
 
       // update received email type
       await updateReceivedEmail(receivedEmailId, 'article', user.id)

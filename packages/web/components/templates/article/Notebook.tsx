@@ -1,27 +1,30 @@
-import { Box, HStack, VStack, SpanBox } from '../../elements/LayoutPrimitives'
-import { StyledText } from '../../elements/StyledText'
-import { theme } from '../../tokens/stitches.config'
-import type { Highlight } from '../../../lib/networking/fragments/highlightFragment'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { updateHighlightMutation } from '../../../lib/networking/mutations/updateHighlightMutation'
-import { showErrorToast, showSuccessToast } from '../../../lib/toastHelpers'
-import { diff_match_patch } from 'diff-match-patch'
-import 'react-markdown-editor-lite/lib/index.css'
-import { createHighlightMutation } from '../../../lib/networking/mutations/createHighlightMutation'
-import { v4 as uuidv4 } from 'uuid'
 import { nanoid } from 'nanoid'
-import { deleteHighlightMutation } from '../../../lib/networking/mutations/deleteHighlightMutation'
-import { HighlightViewItem } from './HighlightViewItem'
-import { ConfirmationModal } from '../../patterns/ConfirmationModal'
-import { TrashIcon } from '../../elements/icons/TrashIcon'
-import { UserBasicData } from '../../../lib/networking/queries/useGetViewerQuery'
-import { ReadableItem } from '../../../lib/networking/queries/useGetLibraryItemsQuery'
-import { SetHighlightLabelsModalPresenter } from './SetLabelsModalPresenter'
-import { Button } from '../../elements/Button'
-import { ArticleNotes } from '../../patterns/ArticleNotes'
-import { useGetArticleQuery } from '../../../lib/networking/queries/useGetArticleQuery'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import 'react-markdown-editor-lite/lib/index.css'
+import { v4 as uuidv4 } from 'uuid'
 import { formattedShortTime } from '../../../lib/dateFormatting'
+import { sortHighlights } from '../../../lib/highlights/sortHighlights'
+import type { Highlight } from '../../../lib/networking/fragments/highlightFragment'
+import {
+  useCreateHighlight,
+  useDeleteHighlight,
+  useUpdateHighlight,
+} from '../../../lib/networking/highlights/useItemHighlights'
+import {
+  ReadableItem,
+  useGetLibraryItemContent,
+} from '../../../lib/networking/library_items/useLibraryItems'
+import { updateHighlightMutation } from '../../../lib/networking/mutations/updateHighlightMutation'
+import { UserBasicData } from '../../../lib/networking/queries/useGetViewerQuery'
 import { isDarkTheme } from '../../../lib/themeUpdater'
+import { showErrorToast, showSuccessToast } from '../../../lib/toastHelpers'
+import { TrashIcon } from '../../elements/icons/TrashIcon'
+import { Box, HStack, SpanBox, VStack } from '../../elements/LayoutPrimitives'
+import { ArticleNotes } from '../../patterns/ArticleNotes'
+import { ConfirmationModal } from '../../patterns/ConfirmationModal'
+import { theme } from '../../tokens/stitches.config'
+import { HighlightViewItem } from './HighlightViewItem'
+import { SetHighlightLabelsModalPresenter } from './SetLabelsModalPresenter'
 
 type NotebookContentProps = {
   viewer: UserBasicData
@@ -36,12 +39,6 @@ type NotebookContentProps = {
   setShowConfirmDeleteNote?: (show: boolean) => void
 }
 
-export const getHighlightLocation = (patch: string): number | undefined => {
-  const dmp = new diff_match_patch()
-  const patches = dmp.patch_fromText(patch)
-  return patches[0].start1 || undefined
-}
-
 type NoteState = {
   isCreating: boolean
   note: Highlight | undefined
@@ -50,12 +47,14 @@ type NoteState = {
 
 export function NotebookContent(props: NotebookContentProps): JSX.Element {
   const isDark = isDarkTheme()
+  const createHighlight = useCreateHighlight()
+  const deleteHighlight = useDeleteHighlight()
+  const updateHighlight = useUpdateHighlight()
 
-  const { articleData, mutate } = useGetArticleQuery({
-    slug: props.item.slug,
-    username: props.viewer.profile.username,
-    includeFriendsHighlights: false,
-  })
+  const { data: article } = useGetLibraryItemContent(
+    props.viewer.profile.username as string,
+    props.item.slug as string
+  )
   const [noteText, setNoteText] = useState<string>('')
   const [showConfirmDeleteHighlightId, setShowConfirmDeleteHighlightId] =
     useState<undefined | string>(undefined)
@@ -87,37 +86,63 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
         }
       })()
     },
-    []
+    [props]
   )
 
-  const createNote = useCallback((text: string) => {
-    noteState.current.isCreating = true
-    noteState.current.createStarted = new Date()
-    ;(async () => {
-      try {
-        const success = await createHighlightMutation({
-          id: newNoteId,
-          shortId: nanoid(8),
-          type: 'NOTE',
-          articleId: props.item.id,
-          annotation: text,
+  const deleteNote = useCallback(
+    (noteId: string) => {
+      ;(async () => {
+        const result = await deleteHighlight.mutateAsync({
+          itemId: props.item.id,
+          slug: props.item.slug,
+          highlightId: noteId,
         })
-        if (success) {
-          noteState.current.note = success
-          noteState.current.isCreating = false
+        if (result) {
+          noteState.current.note = undefined
+          setNoteText('')
         } else {
+          setErrorSaving('Error deleting note')
+        }
+      })()
+    },
+    [props, deleteHighlight]
+  )
+
+  const createNote = useCallback(
+    (text: string) => {
+      noteState.current.isCreating = true
+      noteState.current.createStarted = new Date()
+      ;(async () => {
+        try {
+          const success = await createHighlight.mutateAsync({
+            itemId: props.item.id,
+            slug: props.item.slug,
+            input: {
+              id: newNoteId,
+              shortId: nanoid(8),
+              type: 'NOTE',
+              articleId: props.item.id,
+              annotation: text,
+            },
+          })
+          if (success) {
+            noteState.current.note = success
+            noteState.current.isCreating = false
+          } else {
+            setErrorSaving('Error creating note')
+          }
+        } catch (error) {
+          console.error('error creating note: ', error)
+          noteState.current.isCreating = false
           setErrorSaving('Error creating note')
         }
-      } catch (error) {
-        console.error('error creating note: ', error)
-        noteState.current.isCreating = false
-        setErrorSaving('Error creating note')
-      }
-    })()
-  }, [])
+      })()
+    },
+    [props, newNoteId]
+  )
 
   const highlights = useMemo(() => {
-    const result = articleData?.article.article.highlights
+    const result = article?.highlights
     const note = result?.find((h) => h.type === 'NOTE')
     if (note) {
       noteState.current.note = note
@@ -127,42 +152,16 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
       setNoteText('')
     }
     return result
-  }, [articleData])
+  }, [article])
 
   useEffect(() => {
     if (highlights && props.onAnnotationsChanged) {
       props.onAnnotationsChanged(highlights)
     }
-  }, [highlights])
+  }, [props, highlights])
 
   const sortedHighlights = useMemo(() => {
-    const sorted = (a: number, b: number) => {
-      if (a < b) {
-        return -1
-      }
-      if (a > b) {
-        return 1
-      }
-      return 0
-    }
-
-    return (highlights ?? [])
-      .filter((h) => h.type === 'HIGHLIGHT')
-      .sort((a: Highlight, b: Highlight) => {
-        if (a.highlightPositionPercent && b.highlightPositionPercent) {
-          return sorted(a.highlightPositionPercent, b.highlightPositionPercent)
-        }
-        // We do this in a try/catch because it might be an invalid diff
-        // With PDF it will definitely be an invalid diff.
-        try {
-          const aPos = getHighlightLocation(a.patch)
-          const bPos = getHighlightLocation(b.patch)
-          if (aPos && bPos) {
-            return sorted(aPos, bPos)
-          }
-        } catch {}
-        return a.createdAt.localeCompare(b.createdAt)
-      })
+    return sortHighlights(highlights ?? [])
   }, [highlights])
 
   const handleSaveNoteText = useCallback(
@@ -171,9 +170,19 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
 
       setLastChanged(changeTime)
       if (noteState.current.note) {
+        if (noteState.current.note.type === 'NOTE' && text === '') {
+          deleteNote(noteState.current.note.id)
+          return
+        }
+
         updateNote(noteState.current.note, text, changeTime)
         return
       }
+
+      if (text === '') {
+        return
+      }
+
       if (noteState.current.isCreating) {
         if (noteState.current.createStarted) {
           const timeSinceStart =
@@ -186,9 +195,10 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
         }
         return
       }
+
       createNote(text)
     },
-    [noteText, noteState, createNote, updateNote, highlights]
+    [createNote, updateNote, deleteNote]
   )
 
   const deleteDocumentNote = useCallback(() => {
@@ -196,7 +206,11 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
       highlights
         ?.filter((h) => h.type === 'NOTE')
         .forEach(async (h) => {
-          const result = await deleteHighlightMutation(props.item.id, h.id)
+          const result = await deleteHighlight.mutateAsync({
+            itemId: props.item.id,
+            slug: props.item.slug,
+            highlightId: h.id,
+          })
           if (!result) {
             showErrorToast('Error deleting note')
           }
@@ -204,21 +218,11 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
       noteState.current.note = undefined
     })()
     setNoteText('')
-  }, [noteState, highlights])
+  }, [props, noteState, highlights])
 
   const [errorSaving, setErrorSaving] = useState<string | undefined>(undefined)
   const [lastChanged, setLastChanged] = useState<Date | undefined>(undefined)
   const [lastSaved, setLastSaved] = useState<Date | undefined>(undefined)
-
-  useEffect(() => {
-    const highlightsUpdated = () => {
-      mutate()
-    }
-    document.addEventListener('highlightsUpdated', highlightsUpdated)
-    return () => {
-      document.removeEventListener('highlightsUpdated', highlightsUpdated)
-    }
-  }, [mutate])
 
   return (
     <VStack
@@ -288,7 +292,8 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
             setSetLabelsTarget={setLabelsTarget}
             setShowConfirmDeleteHighlightId={setShowConfirmDeleteHighlightId}
             updateHighlight={() => {
-              mutate()
+              // nothing should be needed here anymore with new caching
+              console.log('update highlight')
             }}
           />
         ))}
@@ -325,11 +330,11 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
           onAccept={() => {
             ;(async () => {
               const highlightId = showConfirmDeleteHighlightId
-              const success = await deleteHighlightMutation(
-                props.item.id,
-                showConfirmDeleteHighlightId
-              )
-              mutate()
+              const success = await deleteHighlight.mutateAsync({
+                itemId: props.item.id,
+                slug: props.item.slug,
+                highlightId: showConfirmDeleteHighlightId,
+              })
               if (success) {
                 showSuccessToast('Highlight deleted.', {
                   position: 'bottom-right',
@@ -359,8 +364,11 @@ export function NotebookContent(props: NotebookContentProps): JSX.Element {
         <SetHighlightLabelsModalPresenter
           highlight={labelsTarget}
           highlightId={labelsTarget.id}
+          onUpdate={(highlight) => {
+            // Don't actually need to do something here
+            console.log('update highlight: ', highlight)
+          }}
           onOpenChange={() => {
-            mutate()
             setLabelsTarget(undefined)
           }}
         />

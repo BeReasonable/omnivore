@@ -7,6 +7,7 @@ import * as jwt from 'jsonwebtoken'
 import { Speech } from '../entity/speech'
 import { env } from '../env'
 import { CreateArticleErrorCode } from '../generated/graphql'
+import { userRepository } from '../repository/user'
 import { Claims } from '../resolvers/types'
 import { createPageSaveRequest } from '../services/create_page_save_request'
 import { findLibraryItemById } from '../services/library_item'
@@ -32,6 +33,9 @@ export function articleRouter() {
     const { url } = req.body as {
       url?: string
     }
+    if (!url) {
+      return res.status(400).send({ errorCode: 'BAD_DATA' })
+    }
 
     const token = req?.cookies?.auth || req?.headers?.authorization
     const claims = await getClaimsByToken(token)
@@ -40,20 +44,10 @@ export function articleRouter() {
     }
 
     const { uid } = claims
-
-    logger.info('Article saving request', {
-      body: req.body,
-      labels: {
-        source: 'SaveEndpoint',
-        userId: uid,
-      },
-    })
-
-    if (!url) {
-      return res.status(400).send({ errorCode: 'BAD_DATA' })
+    const user = await userRepository.findById(uid)
+    if (!user) {
+      return res.status(400).send('Bad Request')
     }
-
-    const result = await createPageSaveRequest({ userId: uid, url })
 
     if (isSiteBlockedForParse(url)) {
       return res
@@ -61,14 +55,17 @@ export function articleRouter() {
         .send({ errorCode: CreateArticleErrorCode.NotAllowedToParse })
     }
 
-    if (result.errorCode) {
-      return res.status(400).send({ errorCode: result.errorCode })
-    }
+    try {
+      const result = await createPageSaveRequest({ user, url })
 
-    return res.send({
-      articleSavingRequestId: result.id,
-      url: result.url,
-    })
+      return res.send({
+        articleSavingRequestId: result.id,
+        url: result.originalUrl,
+      })
+    } catch (error) {
+      logger.error('Error saving article:', error)
+      return res.status(500).send({ errorCode: 'INTERNAL_ERROR' })
+    }
   })
 
   router.get(
@@ -98,7 +95,9 @@ export function articleRouter() {
       })
 
       try {
-        const item = await findLibraryItemById(articleId, uid)
+        const item = await findLibraryItemById(articleId, uid, {
+          select: ['title', 'readableContent', 'itemLanguage'],
+        })
         if (!item) {
           return res.status(404).send('Page not found')
         }

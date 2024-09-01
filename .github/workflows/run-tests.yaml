@@ -5,11 +5,13 @@ on:
       - main
     paths-ignore:
       - 'apple/**'
+      - 'android/**'
   pull_request:
     branches:
       - main
     paths-ignore:
       - 'apple/**'
+      - 'android/**'
 
 env:
   NEXT_PUBLIC_APP_ENV: prod
@@ -75,6 +77,7 @@ jobs:
           PG_PASSWORD: postgres
           PG_DB: omnivore_test
           PGPASSWORD: postgres # This is required for the psql command to work without a password prompt
+          PG_EXTRA_OPTIONS: '-c lock_timeout=2000'
       - name: TypeScript Build and Lint
         run: |
           source ~/.nvm/nvm.sh
@@ -93,11 +96,13 @@ jobs:
           PG_DB: omnivore_test
           PG_LOGGER: debug
           REDIS_URL: redis://localhost:${{ job.services.redis.ports[6379] }}
+          MQ_REDIS_URL: redis://localhost:${{ job.services.redis.ports[6379] }}
   build-docker-images:
     name: Build docker images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v2
         with:
           fetch-depth: 0
       - name: Build the API docker image
@@ -106,5 +111,5 @@ jobs:
         run: 'docker build --file packages/content-fetch/Dockerfile .'
       - name: Build the inbound-email-handler docker image
         run: 'docker build --file packages/inbound-email-handler/Dockerfile .'
-      - name: Build the content-fetch cloud function docker image
-        run: 'docker build --file packages/content-fetch/Dockerfile-gcf .'
+      - name: Build the tts docker image
+        run: 'docker build --file packages/text-to-speech/Dockerfile .'

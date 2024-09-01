@@ -6,6 +6,7 @@ import {
   Trigger,
   Arrow,
   Label,
+  Portal,
 } from '@radix-ui/react-dropdown-menu'
 import { PopperContentProps } from '@radix-ui/react-popover'
 import { CSS } from '@stitches/react'
@@ -16,13 +17,12 @@ const StyledItem = styled(Item, {
   fontWeight: '400',
   py: '10px',
   px: '15px',
-  borderRadius: 3,
   cursor: 'default',
   color: '$utilityTextDefault',
 
   '&:focus': {
     outline: 'none',
-    backgroundColor: '$grayBgHover',
+    backgroundColor: '$thLeftMenuBackground',
   },
 })
 
@@ -32,7 +32,7 @@ const DropdownTrigger = styled(Trigger, {
   padding: 0,
   backgroundColor: 'transparent',
   '&:hover': {
-    opacity: 0.7,
+    opacity: 1.0,
   },
   '&:focus': {
     outline: 'none',
@@ -48,6 +48,7 @@ const StyledTriggerItem = styled(Trigger, {
 
 export const DropdownContent = styled(Content, {
   width: 195,
+  zIndex: 100,
   backgroundColor: '$grayBg',
   borderRadius: '6px',
   outline: '1px solid #323232',
@@ -128,7 +129,7 @@ type DropdownProps = {
 export const DropdownSeparator = styled(Separator, {
   height: '1px',
   margin: 0,
-  backgroundColor: '$grayBorder',
+  backgroundColor: '$homeDivider',
 })
 
 type DropdownOptionProps = {
@@ -173,28 +174,34 @@ export function Dropdown(
     <Root modal={modal} onOpenChange={props.onOpenChange}>
       <DropdownTrigger
         disabled={disabled}
-        css={{ height: '100%', cursor: 'pointer' }}
+        css={{
+          height: '100%',
+          cursor: 'pointer',
+          '&:hover': { opacity: '1.0' },
+        }}
       >
         {triggerElement}
       </DropdownTrigger>
-      <DropdownContent
-        css={css}
-        onInteractOutside={() => {
-          // remove focus from dropdown
-          ;(document.activeElement as HTMLElement).blur()
-        }}
-        side={side}
-        sideOffset={sideOffset}
-        align={align ? align : 'center'}
-        alignOffset={alignOffset}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault()
-        }}
-      >
-        {labelText && <StyledLabel>{labelText}</StyledLabel>}
-        {children}
-        <StyledArrow />
-      </DropdownContent>
+      <Portal>
+        <DropdownContent
+          css={css}
+          onInteractOutside={() => {
+            // remove focus from dropdown
+            ;(document.activeElement as HTMLElement).blur()
+          }}
+          side={side}
+          sideOffset={sideOffset}
+          align={align ? align : 'center'}
+          alignOffset={alignOffset}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+          }}
+        >
+          {labelText && <StyledLabel>{labelText}</StyledLabel>}
+          {children}
+          <StyledArrow />
+        </DropdownContent>
+      </Portal>
     </Root>
   )
 }

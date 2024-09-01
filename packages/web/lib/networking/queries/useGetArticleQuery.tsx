@@ -1,25 +1,21 @@
 import { gql } from 'graphql-request'
-import useSWRImmutable, { Cache } from 'swr'
-import {
-  gqlFetcher,
-  makeGqlFetcher,
-  RequestContext,
-  ssrFetcher,
-} from '../networkHelpers'
+import { Cache } from 'swr'
+import { gqlFetcher, makeGqlFetcher } from '../networkHelpers'
 import {
   articleFragment,
   ContentReader,
   State,
 } from '../fragments/articleFragment'
 import { Highlight, highlightFragment } from '../fragments/highlightFragment'
-import { ScopedMutator } from 'swr/dist/types'
+import { ScopedMutator } from 'swr/dist/_internal'
 import { Label, labelFragment } from '../fragments/labelFragment'
 import {
+  ArticleAttributes,
   LibraryItems,
   Recommendation,
-  recommendationFragment,
-} from './useGetLibraryItemsQuery'
+} from '../library_items/useLibraryItems'
 import useSWR from 'swr'
+import { recommendationFragment } from '../library_items/gql'
 
 type ArticleQueryInput = {
   username?: string
@@ -42,34 +38,6 @@ type ArticleData = {
 type NestedArticleData = {
   article: ArticleAttributes
   errorCodes?: string[]
-}
-
-export type ArticleAttributes = {
-  id: string
-  title: string
-  url: string
-  originalArticleUrl: string
-  author?: string
-  image?: string
-  savedAt: string
-  isArchived: boolean
-  createdAt: string
-  publishedAt?: string
-  description?: string
-  wordsCount?: number
-  contentReader: ContentReader
-  readingProgressPercent: number
-  readingProgressTopPercent?: number
-  readingProgressAnchorIndex: number
-  slug: string
-  folder: string
-  savedByViewer?: boolean
-  content: string
-  highlights: Highlight[]
-  linkId: string
-  labels?: Label[]
-  state?: State
-  recommendations?: Recommendation[]
 }
 
 const query = gql`
@@ -118,7 +86,8 @@ export function useGetArticleQuery({
 
   const { data, error, mutate } = useSWR(
     slug ? [query, username, slug, includeFriendsHighlights] : null,
-    makeGqlFetcher(variables)
+    makeGqlFetcher(query, variables),
+    {}
   )
 
   let resultData: ArticleData | undefined = data as ArticleData

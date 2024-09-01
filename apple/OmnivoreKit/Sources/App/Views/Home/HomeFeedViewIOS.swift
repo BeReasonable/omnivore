@@ -1,3 +1,4 @@
+// swiftlint:disable file_length type_body_length
 import CoreData
 import Models
 import Services
@@ -150,13 +151,15 @@ struct EmptyState: View {
       return AnyView(Group {
         Spacer()
 
-        VStack(alignment: .center, spacing: 20) {
-          Text("No results found for this query")
-            .font(Font.system(size: 18, weight: .bold))
+        if viewModel.showLoadingBar == .none {
+          VStack(alignment: .center, spacing: 20) {
+            Text("No results found for this query")
+              .font(Font.system(size: 18, weight: .bold))
+          }
+          .frame(minHeight: 400)
+          .frame(maxWidth: .infinity)
+          .padding()
         }
-        .frame(minHeight: 400)
-        .frame(maxWidth: .infinity)
-        .padding()
 
         Spacer()
       })
@@ -179,7 +182,7 @@ struct AnimatingCellHeight: AnimatableModifier {
 
 // swiftlint:disable file_length
 #if os(iOS)
-  private let enableGrid = UIDevice.isIPad || FeatureFlag.enableGridCardsOnPhone
+  private let enableGrid = UIDevice.isIPad
 
   @MainActor
   struct HomeFeedContainerView: View {
@@ -189,6 +192,8 @@ struct AnimatingCellHeight: AnimatableModifier {
     @State var isListScrolled = false
     @State var listTitle = ""
     @State var showExpandedAudioPlayer = false
+    @State var showLibraryDigest = false
+    @State var showDigestConfig = false
 
     @Binding var isEditMode: EditMode
 
@@ -262,13 +267,17 @@ struct AnimatingCellHeight: AnimatableModifier {
           VStack(spacing: 0) {
             Spacer()
 
-            if let audioProperties = audioController.itemAudioProperties {
-              MiniPlayerViewer(itemAudioProperties: audioProperties)
+            if audioController.itemAudioProperties != nil {
+              MiniPlayerViewer()
                 .padding(.top, 10)
                 .padding(.bottom, 20)
                 .background(Color.themeTabBarColor)
                 .onTapGesture {
-                  showExpandedAudioPlayer = true
+                  if audioController.itemAudioProperties?.audioItemType == .digest {
+                    showLibraryDigest = true
+                  } else {
+                    showExpandedAudioPlayer = true
+                  }
                 }
             }
           }
@@ -314,6 +323,24 @@ struct AnimatingCellHeight: AnimatableModifier {
           }
         )
       }
+      .fullScreenCover(isPresented: $showLibraryDigest) {
+        if #available(iOS 17.0, *) {
+          NavigationView {
+            FullScreenDigestView(dataService: dataService, audioController: audioController)
+          }
+        } else {
+          Text("Sorry digest is only available on iOS 17 and above")
+        }
+      }
+      .sheet(isPresented: $showDigestConfig) {
+        if #available(iOS 17.0, *) {
+          NavigationView {
+            DigestConfigView(dataService: dataService, homeViewModel: viewModel)
+          }
+        } else {
+          Text("Sorry digest is only available on iOS 17 and above")
+        }
+      }
       .toolbar {
         toolbarItems
       }
@@ -321,14 +348,6 @@ struct AnimatingCellHeight: AnimatableModifier {
         Task {
           await viewModel.loadNewItems(dataService: dataService)
         }
-      }
-      .onReceive(NotificationCenter.default.publisher(for: Notification.Name("PushJSONArticle"))) { notification in
-        guard let jsonArticle = notification.userInfo?["article"] as? JSONArticle else { return }
-        guard let objectID = dataService.persist(jsonArticle: jsonArticle) else { return }
-        guard let linkedItem = dataService.viewContext.object(with: objectID) as? Models.LibraryItem else { return }
-        viewModel.pushFeedItem(item: linkedItem)
-        viewModel.selectedItem = linkedItem
-        viewModel.linkIsActive = true
       }
       .sheet(isPresented: $searchPresented) {
         LibrarySearchView(homeFeedViewModel: self.viewModel)
@@ -342,6 +361,9 @@ struct AnimatingCellHeight: AnimatableModifier {
         // initial help view
         if viewModel.currentFolder == "following", viewModel.fetcher.items.count > 0 {
           viewModel.stopUsingFollowingPrimer = true
+        }
+        if dataService.digestNeedsRefresh() {
+          await viewModel.checkForDigestUpdate(dataService: dataService)
         }
       }
       .environment(\.editMode, self.$isEditMode)
@@ -369,58 +391,88 @@ struct AnimatingCellHeight: AnimatableModifier {
         }
 
         ToolbarItemGroup(placement: .barTrailing) {
-          if isEditMode == .active {
-            Button(action: { isEditMode = .inactive }, label: { Text("Cancel") })
-          } else {
-            if prefersListLayout {
+            if viewModel.appliedFilter?.name == "Deleted" {
+              if viewModel.isEmptyingTrash {
+                ProgressView()
+              } else {
+                Button(
+                  action: {
+                    viewModel.emptyTrash(dataService: dataService)
+                  },
+                  label: {
+                    Text("Empty trash").tint(Color.blue)
+                  })
+                .buttonStyle(.plain)
+                .foregroundColor(Color.blue)
+              }
+            } else {
+              if isEditMode == .active {
+                Button(action: { isEditMode = .inactive }, label: { Text("Cancel") })
+              } else {
+                if #available(iOS 17.0, *), dataService.featureFlags.digestEnabled {
+                  Button(
+                    action: { showLibraryDigest = true },
+                    label: { viewModel.digestIsUnread ? Image.tabDigestSelected : Image.tabDigest }
+                  )
+                  .buttonStyle(.plain)
+                  .padding(.trailing, 4)
+                } else if #available(iOS 17.0, *), !dataService.featureFlags.digestEnabled, !viewModel.hideDigestIcon {
+                  Button(
+                    action: { showDigestConfig = true },
+                    label: { Image.tabDigestSelected }
+                  )
+                  .buttonStyle(.plain)
+                  .padding(.trailing, 4)
+                }
+                if prefersListLayout {
+                  Button(
+                    action: { isEditMode = isEditMode == .active ? .inactive : .active },
+                    label: {
+                      Image
+                        .selectMultiple
+                        .foregroundColor(Color.toolbarItemForeground)
+                    }
+                  ).buttonStyle(.plain)
+                    .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
+                }
+                if enableGrid {
+                  Button(
+                    action: { prefersListLayout.toggle() },
+                    label: {
+                      Image(systemName: prefersListLayout ? "square.grid.2x2" : "list.bullet")
+                        .foregroundColor(Color.toolbarItemForeground)
+                    }
+                  ).buttonStyle(.plain)
+                    .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
+                }
               Button(
-                action: { isEditMode = isEditMode == .active ? .inactive : .active },
+                action: {
+                  if viewModel.currentFolder == "inbox" {
+                    showAddLinkView = true
+                  } else if viewModel.currentFolder == "following" {
+                    viewModel.showAddFeedView = true
+                  }
+                },
                 label: {
-                  Image
-                    .selectMultiple
+                  Image.addLink
                     .foregroundColor(Color.toolbarItemForeground)
                 }
               ).buttonStyle(.plain)
                 .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
-            }
-            if enableGrid {
-              Button(
-                action: { prefersListLayout.toggle() },
-                label: {
-                  Image(systemName: prefersListLayout ? "square.grid.2x2" : "list.bullet")
-                    .foregroundColor(Color.toolbarItemForeground)
-                }
-              ).buttonStyle(.plain)
-                .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
-            }
 
-            Button(
-              action: {
-                if viewModel.currentFolder == "inbox" {
-                  showAddLinkView = true
-                } else if viewModel.currentFolder == "following" {
-                  viewModel.showAddFeedView = true
-                }
-              },
-              label: {
-                Image.addLink
-                  .foregroundColor(Color.toolbarItemForeground)
-              }
-            ).buttonStyle(.plain)
-              .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
-
-            Button(
-              action: {
-                searchPresented = true
-                isEditMode = .inactive
-              },
-              label: {
-                Image
-                  .magnifyingGlass
-                  .foregroundColor(Color.toolbarItemForeground)
-              }
-            ).buttonStyle(.plain)
-              .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
+                Button(
+                  action: {
+                    searchPresented = true
+                    isEditMode = .inactive
+                  },
+                  label: {
+                    Image
+                      .magnifyingGlass
+                      .foregroundColor(Color.toolbarItemForeground)
+                  }
+                ).buttonStyle(.plain)
+                  .padding(.horizontal, UIDevice.isIPad ? 5 : 0)
+            }
           }
         }
 
@@ -430,19 +482,17 @@ struct AnimatingCellHeight: AnimatableModifier {
               viewModel.bulkAction(dataService: dataService, action: .delete, items: Array(selection))
               isEditMode = .inactive
             }, label: { Image.toolbarTrash })
-              .disabled(selection.count < 1)
-              .padding(.horizontal, UIDevice.isIPad ? 10 : 5)
-
+            .disabled(selection.count < 1)
+            .padding(.horizontal, UIDevice.isIPad ? 10 : 5)
             Spacer()
             Text("\(selection.count) selected").font(.footnote)
             Spacer()
-
             Button(action: {
               viewModel.bulkAction(dataService: dataService, action: .archive, items: Array(selection))
               isEditMode = .inactive
             }, label: { Image.toolbarArchive })
-              .disabled(selection.count < 1)
-              .padding(.horizontal, UIDevice.isIPad ? 10 : 5)
+            .disabled(selection.count < 1)
+            .padding(.horizontal, UIDevice.isIPad ? 10 : 5)
           }
         }
       }
@@ -461,17 +511,27 @@ struct AnimatingCellHeight: AnimatableModifier {
     @ObservedObject var viewModel: HomeFeedViewModel
 
     let showFeatureCards: Bool
+    var slideTransition: PresentationLinkTransition {
+      PresentationLinkTransition.slide(
+        options: PresentationLinkTransition.SlideTransitionOptions(
+          edge: .trailing,
+          options: PresentationLinkTransition.Options(
+            modalPresentationCapturesStatusBarAppearance: true
+          )
+        ))
+    }
 
     var body: some View {
       VStack(spacing: 0) {
         if let linkRequest = viewModel.linkRequest, viewModel.currentListConfig?.hasReadNowSection ?? false {
           PresentationLink(
             transition: PresentationLinkTransition.slide(
-              options: PresentationLinkTransition.SlideTransitionOptions(edge: .trailing,
-                                                                         options:
-                                                                         PresentationLinkTransition.Options(
-                                                                           modalPresentationCapturesStatusBarAppearance: true
-                                                                         ))),
+              options: PresentationLinkTransition.SlideTransitionOptions(
+                edge: .trailing,
+                options: PresentationLinkTransition.Options(
+                  modalPresentationCapturesStatusBarAppearance: true,
+                  preferredPresentationBackgroundColor: ThemeManager.currentBgColor
+                ))),
             isPresented: $viewModel.presentWebContainer,
             destination: {
               WebReaderLoadingContainer(requestID: linkRequest.serverID)
@@ -481,6 +541,20 @@ struct AnimatingCellHeight: AnimatableModifier {
             }
           )
         }
+        PresentationLink(transition: slideTransition, isPresented: $viewModel.linkIsActive) {
+          if let presentingItem = viewModel.selectedItem {
+            if presentingItem.isPDF {
+              PDFContainerView(item: presentingItem)
+            } else {
+              WebReaderContainerView(item: presentingItem)
+            }
+          } else {
+            EmptyView()
+          }
+        } label: {
+          EmptyView()
+        }.buttonStyle(.plain)
+
         if prefersListLayout || !enableGrid {
           HomeFeedListView(
             listTitle: $listTitle,
@@ -493,8 +567,13 @@ struct AnimatingCellHeight: AnimatableModifier {
           )
         } else {
           HomeFeedGridView(
+            listTitle: $listTitle,
+            isListScrolled: $isListScrolled,
+            prefersListLayout: $prefersListLayout,
+            isEditMode: $isEditMode,
+            selection: $selection,
             viewModel: viewModel,
-            isListScrolled: $isListScrolled
+            showFeatureCards: showFeatureCards
           )
         }
       }.sheet(isPresented: $viewModel.showLabelsSheet) {
@@ -504,29 +583,6 @@ struct AnimatingCellHeight: AnimatableModifier {
         ) {
           viewModel.selectedLabels = $0
           viewModel.negatedLabels = $1
-        }
-      }
-      .popup(isPresented: $viewModel.showSnackbar) {
-        if let operation = viewModel.snackbarOperation {
-          Snackbar(isShowing: $viewModel.showSnackbar, operation: operation)
-        } else {
-          EmptyView()
-        }
-      } customize: {
-        $0
-          .type(.toast)
-          .autohideIn(2)
-          .position(.bottom)
-          .animation(.spring())
-          .isOpaque(false)
-      }
-      .onReceive(NSNotification.librarySnackBarPublisher) { notification in
-        if !viewModel.showSnackbar {
-          if let message = notification.userInfo?["message"] as? String {
-            viewModel.snackbarOperation = SnackbarOperation(message: message,
-                                                            undoAction: notification.userInfo?["undoAction"] as? SnackbarUndoAction)
-            viewModel.showSnackbar = true
-          }
         }
       }
     }
@@ -558,10 +614,6 @@ struct AnimatingCellHeight: AnimatableModifier {
           .frame(width: nil, height: 0.5, alignment: .bottom)
           .foregroundColor(isListScrolled && UIDevice.isIPhone ? Color(hex: "#3D3D3D") : Color.systemBackground), alignment: .bottom)
         .dynamicTypeSize(.small ... .accessibility1)
-    }
-
-    func menuItems(for item: Models.LibraryItem) -> some View {
-      libraryItemMenu(dataService: dataService, viewModel: viewModel, item: item)
     }
 
     var featureCard: some View {
@@ -700,15 +752,6 @@ struct AnimatingCellHeight: AnimatableModifier {
       }
     }
 
-    var redactedItems: some View {
-      ForEach(Array(fakeLibraryItems(dataService: dataService).enumerated()), id: \.1.id) { _, item in
-        let horizontalInset = CGFloat(UIDevice.isIPad ? 20 : 10)
-        LibraryItemCard(item: item, viewer: dataService.currentViewer)
-          .listRowSeparatorTint(Color.thBorderColor)
-          .listRowInsets(.init(top: 0, leading: horizontalInset, bottom: 10, trailing: horizontalInset))
-      }.redacted(reason: .placeholder)
-    }
-
     var listItems: some View {
       ForEach(Array(viewModel.fetcher.items.enumerated()), id: \.1.unwrappedID) { idx, item in
         let horizontalInset = CGFloat(UIDevice.isIPad ? 20 : 10)
@@ -731,7 +774,7 @@ struct AnimatingCellHeight: AnimatableModifier {
         .listRowSeparatorTint(Color.thBorderColor)
         .listRowInsets(.init(top: 0, leading: horizontalInset, bottom: 10, trailing: horizontalInset))
         .contextMenu {
-          menuItems(for: item)
+          libraryItemMenu(dataService: dataService, viewModel: viewModel, item: item)
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
           if let listConfig = viewModel.currentListConfig {
@@ -760,9 +803,40 @@ struct AnimatingCellHeight: AnimatableModifier {
       }
     }
 
+    @State private var isAnimating = false
+
+    var progress: some View {
+        GeometryReader { geometry in
+            VStack {
+                Spacer()
+                Rectangle()
+                    .fill(Color.yellow)
+                    .frame(height: 2)
+                    .offset(x: self.isAnimating ? geometry.size.width - 40 : 0)
+                    .frame(width: self.isAnimating ? geometry.size.width : 40)
+                    .animation(Animation.linear(duration: 2).repeatForever(autoreverses: true))
+                Spacer()
+            }
+            .onAppear {
+                self.isAnimating = true
+            }
+            .frame(height: 2)
+        }
+        .background(.clear)
+        .edgesIgnoringSafeArea(.all)
+    }
+
     var body: some View {
       VStack(spacing: 0) {
-        Color.systemBackground.frame(height: 1)
+        if viewModel.showLoadingBar == .simple {
+          progress
+            .frame(height: 2)
+            .frame(maxWidth: .infinity)
+            .listRowSeparator(.hidden, edges: .all)
+            .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+        } else {
+          Color.systemBackground.frame(height: 2)
+        }
         ScrollViewReader { reader in
           List(selection: $selection) {
             Section(content: {
@@ -799,16 +873,15 @@ struct AnimatingCellHeight: AnimatableModifier {
                     }
                 }
 
-                if viewModel.showLoadingBar == .redacted {
-                  redactedItems
-                } else if viewModel.showLoadingBar == .simple {
-                  VStack {
-                    ProgressView()
-                  }
-                  .frame(minHeight: 400)
-                  .frame(maxWidth: .infinity)
-                  .padding()
-                  .listRowSeparator(.hidden, edges: .all)
+                if viewModel.isEmptyingTrash {
+                    VStack {
+                      Text("Emptying trash")
+                      ProgressView()
+                    }
+                    .frame(minHeight: 400)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .listRowSeparator(.hidden, edges: .all)
                 } else if viewModel.fetcher.items.isEmpty {
                   EmptyState(viewModel: viewModel)
                     .listRowSeparator(.hidden, edges: .all)
@@ -819,7 +892,9 @@ struct AnimatingCellHeight: AnimatableModifier {
             }, header: {
               filtersHeader
             })
-            BottomView(viewModel: viewModel)
+            if viewModel.showLoadingBar == .none {
+              BottomView(viewModel: viewModel)
+            }
           }
           .padding(0)
           .listStyle(.plain)
@@ -915,11 +990,20 @@ struct AnimatingCellHeight: AnimatableModifier {
     @EnvironmentObject var dataService: DataService
     @EnvironmentObject var audioController: AudioController
 
-    @State var isContextMenuOpen = false
+    @Binding var listTitle: String
+    @Binding var isListScrolled: Bool
+    @Binding var prefersListLayout: Bool
+    @Binding var isEditMode: EditMode
+    @State private var showHideFeatureAlert = false
 
+    @Binding var selection: Set<String>
     @ObservedObject var viewModel: HomeFeedViewModel
 
-    @Binding var isListScrolled: Bool
+    let showFeatureCards: Bool
+
+    @State var shouldScrollToTop = false
+    @State var topItem: Models.LibraryItem?
+    @ObservedObject var networkMonitor = NetworkMonitor()
 
     func contextMenuActionHandler(item: Models.LibraryItem, action: GridCardAction) {
       switch action {
@@ -949,10 +1033,6 @@ struct AnimatingCellHeight: AnimatableModifier {
         .dynamicTypeSize(.small ... .accessibility1)
     }
 
-    func menuItems(for item: Models.LibraryItem) -> some View {
-      libraryItemMenu(dataService: dataService, viewModel: viewModel, item: item)
-    }
-
     var body: some View {
       VStack(alignment: .leading) {
         Color.systemBackground.frame(height: 1)
@@ -972,14 +1052,7 @@ struct AnimatingCellHeight: AnimatableModifier {
 
         ScrollView {
           LazyVGrid(columns: [GridItem(.adaptive(minimum: 325, maximum: 400), spacing: 16)], alignment: .center, spacing: 30) {
-            if viewModel.showLoadingBar == .redacted {
-              ForEach(fakeLibraryItems(dataService: dataService), id: \.id) { item in
-                GridCard(item: item)
-                  .aspectRatio(1.0, contentMode: .fill)
-                  .background(Color.systemBackground)
-                  .cornerRadius(6)
-              }.redacted(reason: .placeholder)
-            } else if viewModel.showLoadingBar == .simple {
+            if viewModel.showLoadingBar == .redacted  || viewModel.showLoadingBar == .simple {
               VStack {
                 ProgressView()
               }
@@ -995,7 +1068,7 @@ struct AnimatingCellHeight: AnimatableModifier {
                     viewModel: viewModel
                   )
                   .contextMenu {
-                    menuItems(for: item)
+                    libraryItemMenu(dataService: dataService, viewModel: viewModel, item: item)
                   }
                   .onAppear {
                     if idx >= viewModel.fetcher.items.count - 5 {
@@ -1027,7 +1100,7 @@ struct AnimatingCellHeight: AnimatableModifier {
             }
           }
 
-          if viewModel.fetcher.items.isEmpty {
+          if viewModel.fetcher.items.isEmpty || viewModel.showLoadingBar == .redacted  || viewModel.showLoadingBar == .simple {
             EmptyState(viewModel: viewModel)
           } else {
             HStack {
@@ -1096,31 +1169,6 @@ struct LinkDestination: View {
   }
 }
 
-func fakeLibraryItems(dataService _: DataService) -> [LibraryItemData] {
-  Array(
-    repeatElement(0, count: 20)
-      .map { _ in
-        LibraryItemData(
-          id: UUID().uuidString,
-          title: "fake title that is kind of long so it looks better",
-          pageURLString: "",
-          isArchived: false,
-          author: "fake author",
-          deepLink: nil,
-          hasLabels: false,
-          noteText: nil,
-          readingProgress: 10,
-          wordsCount: 10,
-          isPDF: false,
-          highlights: nil,
-          sortedLabels: [],
-          imageURL: nil,
-          publisherDisplayName: "fake publisher",
-          descriptionText: "This is a fake description"
-        )
-      })
-}
-
 struct BottomView: View {
   @ObservedObject var viewModel: HomeFeedViewModel
   @EnvironmentObject var dataService: DataService
@@ -1141,6 +1189,8 @@ struct BottomView: View {
 
   var innerBody: some View {
     if viewModel.fetcher.items.count < 3 {
+      AnyView(Color.clear)
+    } else if viewModel.appliedFilter?.name == "Deleted" {
       AnyView(Color.clear)
     } else {
       AnyView(HStack {

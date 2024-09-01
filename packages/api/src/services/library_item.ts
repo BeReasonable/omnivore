@@ -1,31 +1,79 @@
 import { ExpressionToken, LiqeQuery } from '@omnivore/liqe'
+import { camelCase } from 'lodash'
 import { DateTime } from 'luxon'
-import { DeepPartial, FindOptionsWhere, ObjectLiteral } from 'typeorm'
+import {
+  DeepPartial,
+  EntityManager,
+  FindOptionsWhere,
+  In,
+  ObjectLiteral,
+} from 'typeorm'
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity'
-import { EntityLabel } from '../entity/entity_label'
+import { ReadingProgressDataSource } from '../datasources/reading_progress_data_source'
+import { appDataSource } from '../data_source'
 import { Highlight } from '../entity/highlight'
 import { Label } from '../entity/label'
 import { LibraryItem, LibraryItemState } from '../entity/library_item'
+import { env } from '../env'
 import { BulkActionType, InputMaybe, SortParams } from '../generated/graphql'
-import { createPubSubClient, EntityType } from '../pubsub'
+import { createPubSubClient, EntityEvent, EntityType } from '../pubsub'
 import { redisDataSource } from '../redis_data_source'
 import {
   authTrx,
   getColumns,
-  isUniqueViolation,
+  paramtersToObject,
   queryBuilderToRawSql,
-  valuesToRawSql,
+  Select,
+  Sort,
+  SortOrder,
 } from '../repository'
 import { libraryItemRepository } from '../repository/library_item'
-import { setRecentlySavedItemInRedis, wordsCount } from '../utils/helpers'
+import { Merge, PickTuple } from '../util'
+import {
+  deepDelete,
+  setRecentlySavedItemInRedis,
+  stringToHash,
+} from '../utils/helpers'
 import { logger } from '../utils/logger'
 import { parseSearchQuery } from '../utils/search'
+import { deleteHighlightByLibraryItemId, HighlightEvent } from './highlights'
+import {
+  addLabelsToLibraryItem,
+  deleteLabelsByLibraryItemId,
+  LabelEvent,
+} from './labels'
+
+const columnsToDelete = [
+  'user',
+  'uploadFile',
+  'previewContentType',
+  'links',
+  'textContentHash',
+  'readableContent',
+  'feedContent',
+] as const
+type ColumnsToDeleteType = typeof columnsToDelete[number]
+type ItemBaseEvent = Merge<
+  Omit<DeepPartial<LibraryItem>, ColumnsToDeleteType>,
+  {
+    labels?: LabelEvent[]
+    highlights?: HighlightEvent[]
+  }
+>
+export type ItemEvent = Merge<ItemBaseEvent, EntityEvent>
+
+export class RequiresSearchQueryError extends Error {
+  constructor() {
+    super('Requires a search query')
+  }
+}
 
 enum ReadFilter {
   ALL = 'all',
   READ = 'read',
   READING = 'reading',
   UNREAD = 'unread',
+  SEEN = 'seen',
 }
 
 enum InFilter {
@@ -87,20 +135,41 @@ export enum SortBy {
   WORDS_COUNT = 'wordscount',
 }
 
-export enum SortOrder {
-  ASCENDING = 'ASC',
-  DESCENDING = 'DESC',
+const readingProgressDataSource = new ReadingProgressDataSource()
+
+export const batchGetLibraryItems = async (ids: readonly string[]) => {
+  // select all columns except content
+  const select = getColumns(libraryItemRepository).filter(
+    (select) => select !== 'readableContent'
+  )
+  const items = await authTrx(
+    async (tx) =>
+      tx.getRepository(LibraryItem).find({
+        select,
+        where: {
+          id: In(ids as string[]),
+        },
+      }),
+    {
+      replicationMode: 'replica',
+    }
+  )
+
+  return ids.map((id) => items.find((item) => item.id === id) || undefined)
 }
 
-export interface Sort {
-  by: string
-  order?: SortOrder
-  nulls?: 'NULLS FIRST' | 'NULLS LAST'
-}
+export const getItemUrl = (id: string) => `${env.client.url}/me/${id}`
 
-interface Select {
-  column: string
-  alias?: string
+const markItemAsRead = async (libraryItemId: string, userId: string) => {
+  return await readingProgressDataSource.updateReadingProgress(
+    userId,
+    libraryItemId,
+    {
+      readingProgressPercent: 100,
+      readingProgressTopPercent: 100,
+      readingProgressAnchorIndex: undefined,
+    }
+  )
 }
 
 const handleNoCase = (value: string) => {
@@ -120,10 +189,6 @@ const handleNoCase = (value: string) => {
   }
 
   throw new Error(`Unexpected keyword: ${value}`)
-}
-
-const paramtersToObject = (parameters: ObjectLiteral[]) => {
-  return parameters.reduce((a, b) => ({ ...a, ...b }), {})
 }
 
 export const sortParamsToSort = (
@@ -182,7 +247,7 @@ const getColumnName = (field: string) => {
   }
 }
 
-export const buildQuery = (
+export const buildQueryString = (
   searchQuery: LiqeQuery,
   parameters: ObjectLiteral[] = [],
   selects: Select[] = [],
@@ -252,22 +317,23 @@ export const buildQuery = (
             case InFilter.ALL:
               return null
             case InFilter.ARCHIVE:
-              return 'library_item.archived_at IS NOT NULL'
+              return `(library_item.state = 'ARCHIVED' 
+                        OR (library_item.state IN ('SUCCEEDED', 'ARCHIVED', 'PROCESSING', 'FAILED', 'CONTENT_NOT_FETCHED') 
+                          AND library_item.archived_at IS NOT NULL))`
             case InFilter.TRASH:
               // return only deleted pages within 14 days
-              return "library_item.deleted_at >= now() - interval '14 days'"
+              return "(library_item.state = 'DELETED' AND library_item.deleted_at >= NOW() - INTERVAL '14 days')"
             default: {
-              let sql = 'library_item.archived_at IS NULL'
               if (useFolders) {
                 const param = `folder_${parameters.length}`
                 const folderSql = escapeQueryWithParameters(
                   `library_item.folder = :${param}`,
                   { [param]: value }
                 )
-                sql = `(${sql} AND ${folderSql})`
+                return `(library_item.archived_at IS NULL AND ${folderSql})`
               }
 
-              return sql
+              return '(library_item.archived_at IS NULL AND library_item.folder IS NOT NULL)'
             }
           }
         }
@@ -280,6 +346,8 @@ export const buildQuery = (
               return 'library_item.reading_progress_bottom_percent BETWEEN 2 AND 98'
             case ReadFilter.UNREAD:
               return 'library_item.reading_progress_bottom_percent < 2'
+            case ReadFilter.SEEN:
+              return 'library_item.seen_at IS NOT NULL'
             default:
               throw new Error(`Unexpected keyword: ${value}`)
           }
@@ -360,6 +428,20 @@ export const buildQuery = (
               endDate = yesterday.endOf('day').toJSDate()
               break
             }
+            case 'last12hrs':
+              {
+                const ago = new Date()
+                ago.setHours(ago.getHours() - 12)
+                startDate = ago
+              }
+              break
+            case 'last24hrs':
+              {
+                const ago = new Date()
+                ago.setHours(ago.getHours() - 24)
+                startDate = ago
+              }
+              break
             case 'this week':
               startDate = DateTime.local().startOf('week').toJSDate()
               break
@@ -552,30 +634,32 @@ export const buildQuery = (
   return serialize(searchQuery)
 }
 
-export const searchLibraryItems = async (
+export const createSearchQueryBuilder = (
   args: SearchArgs,
-  userId: string
-): Promise<{ libraryItems: LibraryItem[]; count: number }> => {
-  const { from = 0, size = 10 } = args
+  userId: string,
+  em = appDataSource.manager
+) => {
+  const queryBuilder = em.createQueryBuilder(LibraryItem, 'library_item')
 
-  // select all columns except content
+  // exclude content if not requested
   const selects: Select[] = getColumns(libraryItemRepository)
-    .map((column) => ({ column: `library_item.${column}` }))
     .filter(
       (select) =>
-        select.column !== 'library_item.readableContent' &&
-        select.column !== 'library_item.originalContent'
+        args.includeContent ||
+        ['readableContent', 'feedContent', 'previewContent'].indexOf(select) ===
+          -1
     )
+    .map((column) => ({ column: `library_item.${column}` }))
 
   const parameters: ObjectLiteral[] = []
   const orders: Sort[] = []
-  let query: string | null = null
+  let queryString: string | null = null
 
-  if (args.query) {
+  if (args.query !== null && args.query !== undefined) {
     const searchQuery = parseSearchQuery(args.query)
 
-    // build query and save parameters
-    query = buildQuery(
+    // build query string and save parameters
+    queryString = buildQueryString(
       searchQuery,
       parameters,
       selects,
@@ -584,73 +668,192 @@ export const searchLibraryItems = async (
     )
   }
 
-  // add pagination and sorting
+  // add select
+  selects.forEach((select, index) => {
+    // select must be defined before adding additional selects
+    index === 0
+      ? queryBuilder.select(select.column, select.alias)
+      : queryBuilder.addSelect(select.column, select.alias)
+  })
+
+  queryBuilder.where('library_item.user_id = :userId', { userId })
+
+  if (!args.includePending) {
+    queryBuilder.andWhere("library_item.state <> 'PROCESSING'")
+  }
+
+  if (!args.includeDeleted) {
+    queryBuilder.andWhere(
+      "library_item.state IN ('SUCCEEDED', 'ARCHIVED', 'PROCESSING', 'FAILED', 'CONTENT_NOT_FETCHED')"
+    )
+  }
+
+  if (queryString) {
+    // add where clause from query string
+    queryBuilder
+      .andWhere(`(${queryString})`)
+      .setParameters(paramtersToObject(parameters))
+  }
+
+  // default order by saved at descending
+  if (
+    orders.length === 0 ||
+    orders.every((order) => order.by.startsWith('rank')) // if only rank orders are present, add saved at order
+  ) {
+    orders.push({
+      by: 'library_item.saved_at',
+      order: SortOrder.DESCENDING,
+      nulls: 'NULLS LAST',
+    })
+  }
+
+  // add order by
+  orders.forEach((order) => {
+    queryBuilder.addOrderBy(order.by, order.order, order.nulls)
+  })
+
+  return queryBuilder
+}
+
+export const countLibraryItems = async (args: SearchArgs, userId: string) => {
+  return authTrx(
+    async (tx) => createSearchQueryBuilder(args, userId, tx).getCount(),
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
+  )
+}
+
+export const searchLibraryItems = async (
+  args: SearchArgs,
+  userId: string
+): Promise<LibraryItem[]> => {
+  const { from = 0, size = 10 } = args
+
+  if (size === 0) {
+    // return only count if size is 0 because limit 0 is not allowed in typeorm
+    return []
+  }
+
+  return authTrx(
+    async (tx) =>
+      createSearchQueryBuilder(args, userId, tx)
+        .skip(from)
+        .take(size)
+        .getMany(),
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
+  )
+}
+
+export const searchAndCountLibraryItems = async (
+  args: SearchArgs,
+  userId: string
+): Promise<{ libraryItems: LibraryItem[]; count: number }> => {
+  const count = await countLibraryItems(args, userId)
+  if (count === 0) {
+    return { libraryItems: [], count }
+  }
+
+  const libraryItems = await searchLibraryItems(args, userId)
+
+  return { libraryItems, count }
+}
+
+export const findRecentLibraryItems = async (
+  userId: string,
+  limit = 1000,
+  offset?: number
+) => {
+  const selectColumns = getColumns(libraryItemRepository)
+    .filter((column) => column !== 'readableContent')
+    .map((column) => `library_item.${column}`)
+
+  return authTrx(
+    async (tx) =>
+      tx
+        .createQueryBuilder(LibraryItem, 'library_item')
+        .select(selectColumns)
+        .leftJoinAndSelect('library_item.labels', 'labels')
+        .leftJoinAndSelect('library_item.highlights', 'highlights')
+        .where(
+          'library_item.user_id = :userId AND library_item.state = :state',
+          { userId, state: LibraryItemState.Succeeded }
+        )
+        .orderBy('library_item.savedAt', 'DESC', 'NULLS LAST')
+        .take(limit)
+        .skip(offset)
+        .getMany(),
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
+  )
+}
+
+export const findLibraryItemsByIds = async (
+  ids: string[],
+  userId?: string,
+  options?: {
+    select?: (keyof LibraryItem)[]
+    relations?: Array<'labels' | 'highlights'>
+  }
+) => {
+  const selectColumns = (
+    options?.select || getColumns(libraryItemRepository)
+  ).map((column) => `library_item.${column}`)
   return authTrx(
     async (tx) => {
-      const queryBuilder = tx
+      const qb = tx
         .createQueryBuilder(LibraryItem, 'library_item')
-        .where('library_item.user_id = :userId', { userId })
+        .select(selectColumns)
+        .where('library_item.id IN (:...ids)', { ids })
 
-      // add select
-      selects.forEach((select) => {
-        queryBuilder.addSelect(select.column, select.alias)
-      })
-
-      if (!args.includePending) {
-        queryBuilder.andWhere("library_item.state <> 'PROCESSING'")
-      }
-
-      if (!args.includeDeleted) {
-        queryBuilder.andWhere("library_item.state <> 'DELETED'")
-      }
-
-      if (query) {
-        // add where clause from query
-        queryBuilder
-          .andWhere(`(${query})`)
-          .setParameters(paramtersToObject(parameters))
-      }
-
-      const count = await queryBuilder.getCount()
-
-      // default order by saved at descending
-      if (!orders.find((order) => order.by === 'library_item.saved_at')) {
-        orders.push({
-          by: 'library_item.saved_at',
-          order: SortOrder.DESCENDING,
-          nulls: 'NULLS LAST',
+      if (options?.relations) {
+        options.relations.forEach((relation) => {
+          qb.leftJoinAndSelect(`library_item.${relation}`, relation)
         })
       }
 
-      // add order by
-      orders.forEach((order) => {
-        queryBuilder.addOrderBy(order.by, order.order, order.nulls)
-      })
-
-      const libraryItems = await queryBuilder.skip(from).take(size).getMany()
-
-      return { libraryItems, count }
+      return qb.getMany()
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
 export const findLibraryItemById = async (
   id: string,
-  userId: string
+  userId: string,
+  options?: {
+    select?: (keyof LibraryItem)[]
+    relations?: {
+      user?: boolean
+      labels?: boolean
+      highlights?:
+        | {
+            user?: boolean
+          }
+        | boolean
+    }
+  }
 ): Promise<LibraryItem | null> => {
   return authTrx(
     async (tx) =>
-      tx
-        .createQueryBuilder(LibraryItem, 'library_item')
-        .leftJoinAndSelect('library_item.labels', 'labels')
-        .leftJoinAndSelect('library_item.highlights', 'highlights')
-        .leftJoinAndSelect('highlights.user', 'user')
-        .where('library_item.id = :id', { id })
-        .getOne(),
-    undefined,
-    userId
+      tx.withRepository(libraryItemRepository).findOne({
+        select: options?.select,
+        where: { id },
+        relations: options?.relations,
+      }),
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -669,10 +872,12 @@ export const findLibraryItemByUrl = async (
         .leftJoinAndSelect('recommender.profile', 'profile')
         .leftJoinAndSelect('recommendations.group', 'group')
         .where('library_item.user_id = :userId', { userId })
-        .andWhere('library_item.original_url = :url', { url })
+        .andWhere('md5(library_item.original_url) = md5(:url)', { url })
         .getOne(),
-    undefined,
-    userId
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -694,23 +899,49 @@ export const restoreLibraryItem = async (
   )
 }
 
+export const softDeleteLibraryItem = async (
+  id: string,
+  userId: string,
+  pubsub = createPubSubClient()
+): Promise<LibraryItem> => {
+  const deletedLibraryItem = await authTrx(
+    async (tx) => {
+      const itemRepo = tx.withRepository(libraryItemRepository)
+
+      // mark item as deleted
+      await itemRepo.update(id, {
+        state: LibraryItemState.Deleted,
+        deletedAt: new Date(),
+        seenAt: new Date(),
+      })
+
+      return itemRepo.findOneByOrFail({ id })
+    },
+    {
+      uid: userId,
+    }
+  )
+
+  await pubsub.entityDeleted(EntityType.ITEM, id, userId)
+
+  return deletedLibraryItem
+}
+
 export const updateLibraryItem = async (
   id: string,
   libraryItem: QueryDeepPartialEntity<LibraryItem>,
   userId: string,
-  pubsub = createPubSubClient()
+  pubsub = createPubSubClient(),
+  skipPubSub = false
 ): Promise<LibraryItem> => {
   const updatedLibraryItem = await authTrx(
     async (tx) => {
       const itemRepo = tx.withRepository(libraryItemRepository)
 
-      // reset deletedAt and archivedAt
+      // reset archivedAt
       switch (libraryItem.state) {
         case LibraryItemState.Archived:
           libraryItem.archivedAt = new Date()
-          break
-        case LibraryItemState.Deleted:
-          libraryItem.deletedAt = new Date()
           break
         case LibraryItemState.Processing:
         case LibraryItemState.Succeeded:
@@ -722,19 +953,31 @@ export const updateLibraryItem = async (
 
       return itemRepo.findOneByOrFail({ id })
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 
-  await pubsub.entityUpdated<QueryDeepPartialEntity<LibraryItem>>(
-    EntityType.PAGE,
+  if (skipPubSub || libraryItem.state === LibraryItemState.Processing) {
+    return updatedLibraryItem
+  }
+
+  if (libraryItem.state === LibraryItemState.Succeeded) {
+    const data = deepDelete(updatedLibraryItem, columnsToDelete)
+    // send create event if the item was created
+    await pubsub.entityCreated<ItemEvent>(EntityType.ITEM, data, userId)
+
+    return updatedLibraryItem
+  }
+
+  const data = deepDelete(libraryItem, columnsToDelete)
+  await pubsub.entityUpdated<ItemEvent>(
+    EntityType.ITEM,
     {
-      ...libraryItem,
+      ...data,
+      updatedAt: new Date(),
       id,
-      // don't send original content and readable content
-      originalContent: undefined,
-      readableContent: undefined,
-    },
+    } as ItemEvent,
     userId
   )
 
@@ -746,7 +989,8 @@ export const updateLibraryItemReadingProgress = async (
   userId: string,
   bottomPercent: number,
   topPercent: number | null = null,
-  anchorIndex: number | null = null
+  anchorIndex: number | null = null,
+  pubsub = createPubSubClient()
 ): Promise<LibraryItem | null> => {
   // If we have a top percent, we only save it if it's greater than the current top percent
   // or set to zero if the top percent is zero.
@@ -781,18 +1025,26 @@ export const updateLibraryItemReadingProgress = async (
         reading_progress_top_percent as "readingProgressTopPercent",
         reading_progress_bottom_percent as "readingProgressBottomPercent",
         reading_progress_highest_read_anchor as "readingProgressHighestReadAnchor",
-        read_at as "readAt"
+        read_at as "readAt",
+        updated_at as "updatedAt"
       `,
         [id, topPercent, bottomPercent, anchorIndex]
       ),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )) as [LibraryItem[], number]
   if (result[1] === 0) {
     return null
   }
 
   const updatedItem = result[0][0]
+  const readingProgress = updatedItem.readingProgressBottomPercent
+  if (readingProgress === 0 || readingProgress === 100) {
+    // only send PAGE_UPDATED event if users mark item as read or unread
+    await pubsub.entityUpdated<ItemEvent>(EntityType.ITEM, updatedItem, userId)
+  }
+
   return updatedItem
 }
 
@@ -802,79 +1054,114 @@ export const createLibraryItems = async (
 ): Promise<LibraryItem[]> => {
   return authTrx(
     async (tx) => tx.withRepository(libraryItemRepository).save(libraryItems),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
-export const createLibraryItem = async (
-  libraryItem: DeepPartial<LibraryItem>,
+export type CreateOrUpdateLibraryItemArgs = Merge<
+  DeepPartial<LibraryItem>,
+  { originalUrl: string }
+>
+export const createOrUpdateLibraryItem = async (
+  libraryItem: CreateOrUpdateLibraryItemArgs,
   userId: string,
   pubsub = createPubSubClient(),
   skipPubSub = false
 ): Promise<LibraryItem> => {
-  if (!libraryItem.originalUrl) {
-    throw new Error('Original url is required')
-  }
+  let libraryItemCreated: LibraryItem
 
-  try {
-    const newLibraryItem = await authTrx(
-      async (tx) =>
-        tx.withRepository(libraryItemRepository).save({
-          ...libraryItem,
-          wordCount:
-            libraryItem.wordCount ??
-            wordsCount(libraryItem.readableContent || ''),
-        }),
-      undefined,
-      userId
-    )
-    logger.info('item created', { url: libraryItem.originalUrl })
+  const existingLibraryItem = await authTrx(
+    async (tx) =>
+      tx
+        .withRepository(libraryItemRepository)
+        .findByUserIdAndUrl(userId, libraryItem.originalUrl),
+    { uid: userId }
+  )
 
-    // set recently saved item in redis if redis is enabled
-    if (redisDataSource.redisClient) {
-      await setRecentlySavedItemInRedis(
-        redisDataSource.redisClient,
-        userId,
-        newLibraryItem.originalUrl
-      )
-    }
+  if (existingLibraryItem) {
+    const id = existingLibraryItem.id
 
-    if (skipPubSub) {
-      return newLibraryItem
-    }
+    try {
+      // delete labels and highlights if the item was deleted
+      if (existingLibraryItem.state === LibraryItemState.Deleted) {
+        logger.info('Deleting labels and highlights for item', {
+          id,
+        })
 
-    await pubsub.entityCreated<DeepPartial<LibraryItem>>(
-      EntityType.PAGE,
-      {
-        ...newLibraryItem,
-        // don't send original content and readable content
-        originalContent: undefined,
-        readableContent: undefined,
-      },
-      userId
-    )
+        if (existingLibraryItem.highlightAnnotations?.length) {
+          await deleteHighlightByLibraryItemId(userId, id)
+          existingLibraryItem.highlightAnnotations = []
+        }
 
-    return newLibraryItem
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      logger.info('item already created', { url: libraryItem.originalUrl })
-
-      const existingItem = await findLibraryItemByUrl(
-        libraryItem.originalUrl,
-        userId
-      )
-
-      if (!existingItem) {
-        throw new Error(`Item not found for url: ${libraryItem.originalUrl}`)
+        if (existingLibraryItem.labelNames?.length) {
+          await deleteLabelsByLibraryItemId(userId, id)
+          existingLibraryItem.labelNames = []
+        }
       }
-
-      return existingItem
+    } catch (error) {
+      // continue to save the item even if we failed to delete labels and highlights
+      logger.error('Failed to delete labels and highlights', error)
     }
 
-    logger.error('error creating item', error)
-    throw error
+    const existingLabels = existingLibraryItem.labelNames || []
+    const newLabels = libraryItem.labelNames || []
+    const combinedLabels = [...new Set([...existingLabels, ...newLabels])]
+
+    const existingHighlights = existingLibraryItem.highlightAnnotations || []
+    const newHighlights = libraryItem.highlightAnnotations || []
+    const combinedHighlights = [...existingHighlights, ...newHighlights]
+
+    // update existing library item
+    libraryItemCreated = await authTrx(
+      async (tx) =>
+        tx.getRepository(LibraryItem).save({
+          ...libraryItem,
+          id,
+          slug: existingLibraryItem.slug, // keep the original slug
+          labelNames: combinedLabels,
+          highlightAnnotations: combinedHighlights,
+        }),
+      {
+        uid: userId,
+      }
+    )
+
+    // delete the new item if it's different from the existing one
+    if (libraryItem.id && libraryItem.id !== id) {
+      await deleteLibraryItemById(libraryItem.id, userId)
+    }
+  } else {
+    // upsert library item
+    libraryItemCreated = await authTrx(
+      async (tx) =>
+        tx
+          .withRepository(libraryItemRepository)
+          .upsertLibraryItemById(libraryItem),
+      {
+        uid: userId,
+      }
+    )
   }
+
+  // set recently saved item in redis if redis is enabled
+  if (redisDataSource.redisClient) {
+    await setRecentlySavedItemInRedis(
+      redisDataSource.redisClient,
+      userId,
+      libraryItemCreated.originalUrl
+    )
+  }
+
+  if (skipPubSub || libraryItem.state === LibraryItemState.Processing) {
+    return libraryItemCreated
+  }
+
+  const data = deepDelete(libraryItemCreated, columnsToDelete)
+  await pubsub.entityCreated<ItemEvent>(EntityType.ITEM, data, userId)
+
+  return libraryItemCreated
 }
 
 export const findLibraryItemsByPrefix = async (
@@ -884,17 +1171,21 @@ export const findLibraryItemsByPrefix = async (
 ): Promise<LibraryItem[]> => {
   const prefixWildcard = `${prefix}%`
 
-  return authTrx(async (tx) =>
-    tx
-      .createQueryBuilder(LibraryItem, 'library_item')
-      .where('library_item.user_id = :userId', { userId })
-      .andWhere(
-        '(library_item.title ILIKE :prefix OR library_item.site_name ILIKE :prefix)',
-        { prefix: prefixWildcard }
-      )
-      .orderBy('library_item.savedAt', 'DESC')
-      .limit(limit)
-      .getMany()
+  return authTrx(
+    async (tx) =>
+      tx
+        .createQueryBuilder(LibraryItem, 'library_item')
+        .where('library_item.user_id = :userId', { userId })
+        .andWhere(
+          '(library_item.title ILIKE :prefix OR library_item.site_name ILIKE :prefix)',
+          { prefix: prefixWildcard }
+        )
+        .orderBy('library_item.savedAt', 'DESC')
+        .limit(limit)
+        .getMany(),
+    {
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -913,8 +1204,10 @@ export const countByCreatedAt = async (
           endDate,
         })
         .getCount(),
-    undefined,
-    userId
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -922,9 +1215,16 @@ export const batchUpdateLibraryItems = async (
   action: BulkActionType,
   searchArgs: SearchArgs,
   userId: string,
-  labels?: Label[],
+  labelIds?: string[] | null,
   args?: unknown
 ) => {
+  if (!searchArgs.query) {
+    throw new Error('Search query is required')
+  }
+
+  const searchQuery = parseSearchQuery(searchArgs.query)
+  const parameters: ObjectLiteral[] = []
+  const queryString = buildQueryString(searchQuery, parameters)
   interface FolderArguments {
     folder: string
   }
@@ -933,33 +1233,86 @@ export const batchUpdateLibraryItems = async (
     return 'folder' in args
   }
 
+  const getQueryBuilder = (userId: string, em: EntityManager) => {
+    const queryBuilder = em
+      .createQueryBuilder(LibraryItem, 'library_item')
+      .where('library_item.user_id = :userId', { userId })
+    if (queryString) {
+      queryBuilder
+        .andWhere(`(${queryString})`)
+        .setParameters(paramtersToObject(parameters))
+    }
+    return queryBuilder
+  }
+
+  const getLibraryItemIds = async (
+    userId: string,
+    em: EntityManager,
+    forUpdate = false
+  ): Promise<string[]> => {
+    const queryBuilder = getQueryBuilder(userId, em)
+
+    if (forUpdate) {
+      queryBuilder.setLock('pessimistic_read')
+    }
+
+    const libraryItems = await queryBuilder
+      .select('library_item.id', 'id')
+      .take(searchArgs.size)
+      .skip(searchArgs.from)
+      .getRawMany<{ id: string }>()
+
+    return libraryItems.map((item) => item.id)
+  }
+
   const now = new Date().toISOString()
   // build the script
   let values: Record<string, string | number> = {}
-  let addLabels = false
   switch (action) {
     case BulkActionType.Archive:
       values = {
-        archived_at: now,
+        archivedAt: now,
         state: LibraryItemState.Archived,
       }
       break
     case BulkActionType.Delete:
       values = {
         state: LibraryItemState.Deleted,
-        deleted_at: now,
+        deletedAt: now,
       }
       break
-    case BulkActionType.AddLabels:
-      addLabels = true
-      break
-    case BulkActionType.MarkAsRead:
-      values = {
-        read_at: now,
-        reading_progress_top_percent: 100,
-        reading_progress_bottom_percent: 100,
+    case BulkActionType.AddLabels: {
+      if (!labelIds) {
+        throw new Error('Labels are required for this action')
       }
-      break
+
+      const libraryItemIds = await authTrx(
+        async (tx) => getLibraryItemIds(userId, tx),
+        {
+          uid: userId,
+        }
+      )
+      // add labels to library items
+      for (const libraryItemId of libraryItemIds) {
+        await addLabelsToLibraryItem(labelIds, libraryItemId, userId)
+      }
+
+      return
+    }
+    case BulkActionType.MarkAsRead: {
+      const libraryItemIds = await authTrx(
+        async (tx) => getLibraryItemIds(userId, tx),
+        {
+          uid: userId,
+        }
+      )
+      // update reading progress for library items
+      for (const libraryItemId of libraryItemIds) {
+        await markItemAsRead(libraryItemId, userId)
+      }
+
+      return
+    }
     case BulkActionType.MoveToFolder:
       if (!args || !isFolderArguments(args)) {
         throw new Error('Invalid arguments')
@@ -967,93 +1320,36 @@ export const batchUpdateLibraryItems = async (
 
       values = {
         folder: args.folder,
-        saved_at: now,
+        savedAt: now,
       }
 
+      break
+    case BulkActionType.MarkAsSeen:
+      values = {
+        seenAt: now,
+      }
       break
     default:
       throw new Error('Invalid bulk action')
   }
 
-  if (!searchArgs.query) {
-    throw new Error('Search query is required')
-  }
-
-  const searchQuery = parseSearchQuery(searchArgs.query)
-  const parameters: ObjectLiteral[] = []
-  const query = buildQuery(searchQuery, parameters)
-
-  await authTrx(async (tx) => {
-    const queryBuilder = tx
-      .createQueryBuilder(LibraryItem, 'library_item')
-      .where('library_item.user_id = :userId', { userId })
-
-    if (query) {
-      queryBuilder
-        .andWhere(`(${query})`)
-        .setParameters(paramtersToObject(parameters))
+  await authTrx(
+    async (tx) => {
+      const libraryItemIds = await getLibraryItemIds(userId, tx, true)
+      await tx.getRepository(LibraryItem).update(libraryItemIds, values)
+    },
+    {
+      uid: userId,
     }
-
-    if (addLabels) {
-      if (!labels) {
-        throw new Error('Labels are required for this action')
-      }
-
-      const libraryItems = await queryBuilder.getMany()
-      // add labels in library items
-      const labelsToAdd = libraryItems.flatMap((libraryItem) =>
-        labels
-          .map((label) => ({
-            labelId: label.id,
-            libraryItemId: libraryItem.id,
-            name: label.name,
-          }))
-          .filter((entityLabel) => {
-            const existingLabel = libraryItem.labelNames?.find(
-              (l) => l.toLowerCase() === entityLabel.name.toLowerCase()
-            )
-            return !existingLabel
-          })
-      )
-      return tx.getRepository(EntityLabel).save(labelsToAdd)
-    }
-
-    // generate raw sql because postgres doesn't support prepared statements in DO blocks
-    const countSql = queryBuilderToRawSql(queryBuilder.select('COUNT(1)'))
-    const subQuery = queryBuilderToRawSql(queryBuilder.select('id'))
-    const valuesSql = valuesToRawSql(values)
-
-    const start = new Date().toISOString()
-    const batchSize = 1000
-    const sql = `
-    -- Set batch size
-    DO $$ 
-    DECLARE 
-        batch_size INT := ${batchSize};
-    BEGIN
-        -- Loop through batches
-        FOR i IN 0..CEIL((${countSql}) * 1.0 / batch_size) - 1 LOOP
-            -- Update the batch
-            UPDATE omnivore.library_item
-            SET ${valuesSql}
-            WHERE id = ANY(
-              ${subQuery}
-              AND updated_at < '${start}'
-              LIMIT batch_size
-            );
-        END LOOP;
-    END $$
-    `
-
-    return tx.query(sql)
-  })
+  )
 }
 
 export const deleteLibraryItemById = async (id: string, userId?: string) => {
   return authTrx(
     async (tx) => tx.withRepository(libraryItemRepository).delete(id),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -1062,9 +1358,11 @@ export const deleteLibraryItems = async (
   userId?: string
 ) => {
   return authTrx(
-    async (tx) => tx.withRepository(libraryItemRepository).remove(items),
-    undefined,
-    userId
+    async (tx) =>
+      tx.withRepository(libraryItemRepository).delete(items.map((i) => i.id)),
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -1074,8 +1372,9 @@ export const deleteLibraryItemByUrl = async (url: string, userId: string) => {
       tx
         .withRepository(libraryItemRepository)
         .delete({ originalUrl: url, user: { id: userId } }),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -1085,24 +1384,14 @@ export const deleteLibraryItemsByUserId = async (userId: string) => {
       tx.withRepository(libraryItemRepository).delete({
         user: { id: userId },
       }),
-    undefined,
-    userId
-  )
-}
-
-export const deleteLibraryItemsByAdmin = async (
-  criteria: FindOptionsWhere<LibraryItem>
-) => {
-  return authTrx(
-    async (tx) => tx.withRepository(libraryItemRepository).delete(criteria),
-    undefined,
-    undefined,
-    'admin'
+    {
+      uid: userId,
+    }
   )
 }
 
 export const batchDelete = async (criteria: FindOptionsWhere<LibraryItem>) => {
-  const batchSize = 1000
+  const batchSize = 20
 
   const qb = libraryItemRepository.createQueryBuilder().where(criteria)
   const countSql = queryBuilderToRawSql(qb.select('COUNT(1)'))
@@ -1126,4 +1415,369 @@ export const batchDelete = async (criteria: FindOptionsWhere<LibraryItem>) => {
   `
 
   return authTrx(async (t) => t.query(sql))
+}
+
+export const findLibraryItemIdsByLabelId = async (
+  labelId: string,
+  userId: string
+) => {
+  return authTrx(
+    async (tx) => {
+      // find library items have the label or have highlights with the label
+      const result = (await tx.query(
+        `
+        SELECT library_item_id
+        FROM (
+            SELECT library_item_id
+            FROM omnivore.entity_labels
+            WHERE label_id = $1
+                  AND library_item_id IS NOT NULL
+            UNION
+            SELECT h.library_item_id
+            FROM omnivore.highlight h
+            INNER JOIN omnivore.entity_labels ON entity_labels.highlight_id = h.id
+            WHERE label_id = $1
+                  AND highlight_id IS NOT NULL
+        ) AS combined_results
+      `,
+        [labelId]
+      )) as { library_item_id: string }[]
+
+      return result.map((r) => r.library_item_id)
+    },
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
+  )
+}
+
+export const filterItemEvents = (
+  ast: LiqeQuery,
+  events: readonly ItemEvent[]
+): ItemEvent[] => {
+  const testNo = (value: string, event: ItemEvent) => {
+    const keywordRegexMap: Record<string, RegExp> = {
+      highlightAnnotations: /^highlight(s)?$/i,
+      labelNames: /^label(s)?$/i,
+      subscription: /^subscription(s)?$/i,
+    }
+
+    const keys = Object.keys(keywordRegexMap)
+    const matchingKeyword = keys.find((keyword) =>
+      value.match(keywordRegexMap[keyword])
+    )
+
+    if (!matchingKeyword) {
+      throw new Error(`Unexpected keyword: ${value}`)
+    }
+
+    const eventValue = (event as PickTuple<ItemEvent, typeof keys>)[
+      matchingKeyword
+    ]
+
+    return !eventValue || (Array.isArray(eventValue) && eventValue.length === 0)
+  }
+
+  const testEvent = (ast: LiqeQuery, event: ItemEvent) => {
+    if (ast.type !== 'Tag') {
+      throw new Error('Expected a tag expression.')
+    }
+
+    const { field, expression } = ast
+
+    if (expression.type !== 'LiteralExpression') {
+      // ignore empty values
+      throw new Error('Expected a literal expression.')
+    }
+
+    const lowercasedValue = expression.value?.toString()?.toLowerCase()
+
+    if (field.type === 'ImplicitField') {
+      throw new RequiresSearchQueryError()
+    }
+
+    if (!lowercasedValue) {
+      // ignore empty values
+      throw new Error('Expected a non-empty value.')
+    }
+
+    switch (field.name.toLowerCase()) {
+      case 'in': {
+        switch (lowercasedValue) {
+          case InFilter.ALL:
+            return true
+          case InFilter.ARCHIVE:
+            return event.state === LibraryItemState.Archived
+          case InFilter.TRASH:
+            return event.state === LibraryItemState.Deleted
+          default:
+            return (
+              event.state != LibraryItemState.Archived &&
+              event.state != LibraryItemState.Deleted
+            )
+        }
+      }
+
+      case 'is': {
+        switch (lowercasedValue) {
+          case ReadFilter.READ:
+            return (
+              event.readingProgressBottomPercent &&
+              event.readingProgressBottomPercent > 98
+            )
+          case ReadFilter.READING:
+            return (
+              event.readingProgressBottomPercent &&
+              event.readingProgressBottomPercent >= 2 &&
+              event.readingProgressBottomPercent <= 98
+            )
+          case ReadFilter.UNREAD:
+            return (
+              !event.readingProgressBottomPercent ||
+              event.readingProgressBottomPercent < 2
+            )
+          default:
+            throw new Error(`Unexpected keyword: ${lowercasedValue}`)
+        }
+      }
+      case 'type': {
+        return event.itemType?.toLowerCase() === lowercasedValue
+      }
+      case 'label': {
+        const labels = event.labelNames as string[] | undefined
+        const labelsToTest = lowercasedValue.split(',')
+        return labelsToTest.some((label) => {
+          const hasWildcard = label.includes('*')
+          if (hasWildcard) {
+            return labels?.some(
+              (l) => l.match(new RegExp(label.replace('*', '.*'), 'i')) // match wildcard
+            )
+          }
+
+          return labels?.some((l) => l.toLowerCase() === label)
+        })
+      }
+      case 'has':
+        return !testNo(lowercasedValue, event)
+      case 'read':
+      case 'updated':
+      case 'published': {
+        let startDate: Date | undefined
+        let endDate: Date | undefined
+        // check for special date filters
+        switch (lowercasedValue) {
+          case 'today':
+            startDate = DateTime.local().startOf('day').toJSDate()
+            break
+          case 'yesterday': {
+            const yesterday = DateTime.local().minus({ days: 1 })
+            startDate = yesterday.startOf('day').toJSDate()
+            endDate = yesterday.endOf('day').toJSDate()
+            break
+          }
+          case 'this week':
+            startDate = DateTime.local().startOf('week').toJSDate()
+            break
+          case 'this month':
+            startDate = DateTime.local().startOf('month').toJSDate()
+            break
+          default: {
+            // check for date ranges
+            const [start, end] = lowercasedValue.split('..')
+            // validate date
+            if (start && start !== '*') {
+              startDate = new Date(start)
+              if (isNaN(startDate.getTime())) {
+                throw new Error('Invalid start date')
+              }
+            }
+
+            if (end && end !== '*') {
+              endDate = new Date(end)
+              if (isNaN(endDate.getTime())) {
+                throw new Error('Invalid end date')
+              }
+            }
+          }
+        }
+
+        const start = startDate ?? new Date(0)
+        const end = endDate ?? new Date()
+        const key = `${field.name.toLowerCase()}At`
+        const eventValue = event[
+          key as 'readAt' | 'updatedAt' | 'publishedAt'
+        ] as Date
+
+        return eventValue >= start && eventValue <= end
+      }
+      // term filters
+      case 'subscription':
+      case 'rss':
+      case 'language': {
+        const columnName = getColumnName(field.name)
+        // get camel case column name
+        const key = camelCase(columnName) as 'subscription' | 'itemLanguage'
+
+        return event[key]?.toLowerCase() === lowercasedValue
+      }
+      // match filters
+      case 'note':
+        throw new RequiresSearchQueryError()
+      case 'author':
+      case 'title':
+      case 'description': {
+        const key = field.name as 'author' | 'title' | 'description'
+
+        return event[key]?.toString()?.toLowerCase().includes(lowercasedValue)
+      }
+      case 'site': {
+        const keys = ['siteName', 'originalUrl'] as const
+
+        return keys.some((key) => {
+          return event[key]?.toLowerCase().includes(lowercasedValue)
+        })
+      }
+      case 'includes': {
+        const ids = lowercasedValue.split(',')
+        if (!ids || ids.length === 0) {
+          throw new Error('Expected ids')
+        }
+
+        return event.id && ids.includes(event.id)
+      }
+      case 'recommendedby': {
+        if (!event.recommenderNames) {
+          return false
+        }
+
+        if (lowercasedValue === '*') {
+          // select all if * is provided
+          return event.recommenderNames.length > 0
+        }
+
+        return (event.recommenderNames as string[]).some(
+          (name) => name.toLowerCase() === lowercasedValue
+        )
+      }
+      case 'no':
+        return testNo(lowercasedValue, event)
+      case 'use':
+      case 'mode':
+      case 'event':
+        // mode is ignored and used only by the frontend
+        return true
+      case 'readposition':
+      case 'wordscount': {
+        const operatorRegex = /([<>]=?)/
+        const operator = lowercasedValue.match(operatorRegex)?.[0]
+        if (!operator) {
+          throw new Error('Expected operator')
+        }
+
+        const newValue = lowercasedValue.replace(operatorRegex, '')
+        const intValue = parseInt(newValue, 10)
+
+        const column = getColumnName(field.name)
+        const key = camelCase(column) as
+          | 'wordCount'
+          | 'readingProgressBottomPercent'
+        const eventValue = event[key] as number
+
+        switch (operator) {
+          case '>':
+            return eventValue > intValue
+          case '>=':
+            return eventValue >= intValue
+          case '<':
+            return eventValue < intValue
+          case '<=':
+            return eventValue <= intValue
+          default:
+            throw new Error('Unexpected operator')
+        }
+      }
+      default:
+        throw new RequiresSearchQueryError()
+    }
+  }
+
+  if (ast.type === 'Tag') {
+    return events.filter((event) => {
+      return testEvent(ast, event)
+    })
+  }
+
+  if (ast.type === 'UnaryOperator') {
+    const removeRows = filterItemEvents(ast.operand, events)
+
+    return events.filter((event) => {
+      return !removeRows.includes(event)
+    })
+  }
+
+  if (ast.type === 'ParenthesizedExpression') {
+    return filterItemEvents(ast.expression, events)
+  }
+
+  if (!ast.left) {
+    throw new Error('Expected left to be defined.')
+  }
+
+  const leftRows = filterItemEvents(ast.left, events)
+
+  if (!ast.right) {
+    throw new Error('Expected right to be defined.')
+  }
+
+  if (ast.type !== 'LogicalExpression') {
+    throw new Error('Expected a tag expression.')
+  }
+
+  if (ast.operator.operator === 'OR') {
+    const rightRows = filterItemEvents(ast.right, events)
+
+    return Array.from(new Set([...leftRows, ...rightRows]))
+  } else if (ast.operator.operator === 'AND') {
+    return filterItemEvents(ast.right, leftRows)
+  }
+
+  throw new Error('Unexpected state.')
+}
+
+const totalCountCacheKey = (userId: string, args: SearchArgs) => {
+  // sort the args to make sure the cache key is consistent
+  const sortedArgs = JSON.stringify(args, Object.keys(args).sort())
+
+  return `cache:library_items_count:${userId}:${stringToHash(sortedArgs)}`
+}
+
+export const getCachedTotalCount = async (userId: string, args: SearchArgs) => {
+  const cacheKey = totalCountCacheKey(userId, args)
+  const cachedCount = await redisDataSource.redisClient?.get(cacheKey)
+  if (!cachedCount) {
+    return undefined
+  }
+
+  return parseInt(cachedCount, 10)
+}
+
+export const setCachedTotalCount = async (
+  userId: string,
+  args: SearchArgs,
+  count: number
+) => {
+  const cacheKey = totalCountCacheKey(userId, args)
+
+  await redisDataSource.redisClient?.set(cacheKey, count, 'EX', 600)
+}
+
+export const deleteCachedTotalCount = async (userId: string) => {
+  const keyPattern = `cache:library_items_count:${userId}:*`
+  const keys = await redisDataSource.redisClient?.keys(keyPattern)
+  if (!keys || keys.length === 0) {
+    return
+  }
+
+  await redisDataSource.redisClient?.del(keys)
 }

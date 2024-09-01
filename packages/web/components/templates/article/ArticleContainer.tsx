@@ -1,4 +1,3 @@
-import { ArticleAttributes } from '../../../lib/networking/queries/useGetArticleQuery'
 import { Article } from './../../../components/templates/article/Article'
 import { Box, HStack, SpanBox, VStack } from './../../elements/LayoutPrimitives'
 import { StyledText } from './../../elements/StyledText'
@@ -16,9 +15,17 @@ import { updateTheme, updateThemeLocally } from '../../../lib/themeUpdater'
 import { ArticleMutations } from '../../../lib/articleActions'
 import { LabelChip } from '../../elements/LabelChip'
 import { Label } from '../../../lib/networking/fragments/labelFragment'
-import { Recommendation } from '../../../lib/networking/queries/useGetLibraryItemsQuery'
+import {
+  ArticleAttributes,
+  Recommendation,
+  TextDirection,
+  useRestoreItem,
+  useUpdateItemReadStatus,
+} from '../../../lib/networking/library_items/useLibraryItems'
 import { Avatar } from '../../elements/Avatar'
 import { UserBasicData } from '../../../lib/networking/queries/useGetViewerQuery'
+import { State } from '../../../lib/networking/fragments/articleFragment'
+import { showErrorToast, showSuccessToast } from '../../../lib/toastHelpers'
 
 type ArticleContainerProps = {
   viewer: UserBasicData
@@ -36,6 +43,7 @@ type ArticleContainerProps = {
   showHighlightsModal: boolean
   highlightOnRelease?: boolean
   justifyText?: boolean
+  textDirection?: TextDirection
   setShowHighlightsModal: React.Dispatch<React.SetStateAction<boolean>>
 }
 
@@ -111,7 +119,7 @@ const RecommendationComments = (
 
 export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
   const [labels, setLabels] = useState(props.labels)
-  const [title, setTitle] = useState(props.article.title)
+  const [title, setTitle] = useState<string | undefined>(undefined)
   const [showReportIssuesModal, setShowReportIssuesModal] = useState(false)
   const [fontSize, setFontSize] = useState(props.fontSize ?? 20)
   const [highlightOnRelease, setHighlightOnRelease] = useState(
@@ -136,6 +144,11 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
   const highlightHref = useRef(
     window.location.hash ? window.location.hash.split('#')[1] : null
   )
+  const [textDirection, setTextDirection] = useState(
+    props.textDirection ?? 'LTR'
+  )
+
+  const restoreItem = useRestoreItem()
 
   const updateFontSize = useCallback(
     (newFontSize: number) => {
@@ -169,6 +182,14 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
     const updateHighlightMode = (event: UpdateHighlightModeEvent) => {
       const isEnabled = event.enableHighlightOnRelease === 'on'
       setHighlightOnRelease(isEnabled)
+    }
+
+    interface UpdateTextDirectionEvent extends Event {
+      textDirection: TextDirection
+    }
+
+    const handleUpdateTextDirection = (event: UpdateTextDirectionEvent) => {
+      setTextDirection(event.textDirection)
     }
 
     interface UpdateMaxWidthPercentageEvent extends Event {
@@ -331,12 +352,22 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
     return isJustified ? 'justify' : 'start'
   }
 
+  const appliedFont = (name: string | undefined | null) => {
+    if (name === 'System Default') {
+      return 'unset'
+    }
+    return name
+  }
+
   const styles = {
     fontSize,
     margin: props.margin ?? 360,
     maxWidthPercentage: maxWidthPercentageOverride ?? props.maxWidthPercentage,
     lineHeight: lineHeightOverride ?? props.lineHeight ?? 150,
-    fontFamily: fontFamilyOverride ?? props.fontFamily ?? 'inter',
+    fontFamily:
+      appliedFont(fontFamilyOverride) ??
+      appliedFont(props.fontFamily) ??
+      'inter',
     readerFontColor:
       highContrastTextOverride != undefined
         ? textColorValue(highContrastTextOverride)
@@ -362,9 +393,12 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
     )
   }, [props.article.recommendations])
 
+  console.log('props.article', props.article)
+
   return (
     <>
       <Box
+        dir={textDirection}
         id="article-container"
         css={{
           padding: 30,
@@ -413,9 +447,17 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
               fontFamily: styles.fontFamily,
               width: '100%',
               wordWrap: 'break-word',
+              display: '-webkit-box',
+              '-webkit-box-orient': 'vertical',
+              '-webkit-line-clamp': '4',
+              overflow: 'hidden',
+              '@smDown': {
+                '-webkit-line-clamp': '6',
+              },
             }}
+            title={title ?? props.article.title}
           >
-            {title}
+            {title ?? props.article.title}
           </StyledText>
           <ArticleSubtitle
             author={props.article.author}
@@ -435,7 +477,6 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
                   key={label.id}
                   text={label.name}
                   color={label.color}
-                  useAppAppearance={props.isAppleAppEmbed}
                 />
               ))}
             </SpanBox>
@@ -445,6 +486,57 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
               recommendationsWithNotes={recommendationsWithNotes}
             />
           )}
+          {!props.isAppleAppEmbed &&
+            props.article &&
+            props.article.state == State.DELETED && (
+              <VStack
+                css={{
+                  borderRadius: '6px',
+                  m: '20px',
+                  p: '20px',
+                  gap: '10px',
+                  width: '100%',
+                  marginTop: '24px',
+                  bg: 'color(display-p3 0.996 0.71 0 / 0.11)',
+                  lineHeight: '2.0',
+                }}
+                alignment="start"
+                distribution="start"
+              >
+                This item has been deleted. To access all the highlights and
+                content you can restore it. If you do not restore this item it
+                will be removed from your trash after two weeks or when you
+                manually empty your trash.
+                <Button
+                  style="ctaBlue"
+                  onClick={async (event) => {
+                    try {
+                      const item = await restoreItem.mutateAsync({
+                        itemId: props.article.id,
+                        slug: props.article.slug,
+                      })
+                      console.log('restored: ', item)
+                      showSuccessToast('Item restored')
+                    } catch (err) {
+                      console.log('error restoring item: ', err)
+                      showErrorToast('Error restoring item')
+                    }
+                  }}
+                >
+                  Restore item
+                </Button>
+              </VStack>
+            )}
+          {/* {userHasFeature(props.viewer, 'ai-summaries') && (
+            <AISummary
+              libraryItemId={props.article.id}
+              idx="latest"
+              fontFamily={styles.fontFamily}
+              fontSize={styles.fontSize}
+              lineHeight={styles.lineHeight}
+              readerFontColor={styles.readerFontColor}
+            />
+          )} */}
         </VStack>
         <Article
           articleId={props.article.id}
@@ -479,10 +571,7 @@ export function ArticleContainer(props: ArticleContainerProps): JSX.Element {
         viewer={props.viewer}
         item={props.article}
         scrollToHighlight={highlightHref}
-        highlights={props.article.highlights}
-        articleTitle={title}
-        articleAuthor={props.article.author ?? ''}
-        articleId={props.article.id}
+        highlights={props.article.highlights ?? []}
         isAppleAppEmbed={props.isAppleAppEmbed}
         highlightBarDisabled={props.highlightBarDisabled}
         showHighlightsModal={props.showHighlightsModal}

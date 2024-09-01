@@ -11,7 +11,9 @@ export const saveContentDisplayReport = async (
   uid: string,
   input: ReportItemInput
 ): Promise<boolean> => {
-  const item = await findLibraryItemById(input.pageId, uid)
+  const item = await findLibraryItemById(input.pageId, uid, {
+    select: ['id', 'readableContent', 'originalUrl'],
+  })
   if (!item) {
     logger.info('unable to submit report, item not found', input)
     return false
@@ -23,7 +25,6 @@ export const saveContentDisplayReport = async (
   const report = await getRepository(ContentDisplayReport).save({
     user: { id: uid },
     content: item.readableContent,
-    originalHtml: item.originalContent || undefined,
     originalUrl: item.originalUrl,
     reportComment: input.reportComment,
     libraryItemId: item.id,
@@ -33,17 +34,18 @@ export const saveContentDisplayReport = async (
                   ${report.user.id} for URL: ${report.originalUrl}
                   ${report.reportComment}`
 
-  logger.info(message)
-
-  if (!env.dev.isLocal) {
-    // If we are in the local environment, just log a message, otherwise email the report
-    await sendEmail({
-      to: env.sender.feedback,
-      subject: 'New content display report',
-      text: message,
-      from: env.sender.message,
-    })
+  // If we are in the local environment, just log a message, otherwise email the report
+  if (env.dev.isLocal) {
+    logger.info(message)
+    return !!report
   }
+
+  await sendEmail({
+    to: env.sender.feedback,
+    subject: 'New content display report',
+    text: message,
+    from: env.sender.message,
+  })
 
   return !!report
 }
@@ -52,7 +54,9 @@ export const saveAbuseReport = async (
   uid: string,
   input: ReportItemInput
 ): Promise<boolean> => {
-  const item = await findLibraryItemById(input.pageId, uid)
+  const item = await findLibraryItemById(input.pageId, uid, {
+    select: ['id'],
+  })
   if (!item) {
     logger.info('unable to submit report, item not found', input)
     return false

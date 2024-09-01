@@ -1,4 +1,3 @@
-import { Readability } from '@omnivore/readability'
 import axios from 'axios'
 import jwt from 'jsonwebtoken'
 import { promisify } from 'util'
@@ -9,53 +8,43 @@ import {
 } from '../generated/graphql'
 import { redisDataSource } from '../redis_data_source'
 import { userRepository } from '../repository/user'
+import { saveFile } from '../services/save_file'
 import { savePage } from '../services/save_page'
-import { logger } from '../utils/logger'
+import { uploadFile } from '../services/upload_file'
+import { logError, logger } from '../utils/logger'
+import {
+  contentFilePath,
+  downloadFromBucket,
+  downloadFromUrl,
+  isFileExists,
+  uploadToSignedUrl,
+} from '../utils/uploads'
 
 const signToken = promisify(jwt.sign)
 
 const IMPORTER_METRICS_COLLECTOR_URL = env.queue.importerMetricsUrl
 const JWT_SECRET = env.server.jwtSecret
-const REST_BACKEND_ENDPOINT = `${env.server.internalApiUrl}/api`
 
-const MAX_ATTEMPTS = 2
+const MAX_IMPORT_ATTEMPTS = 1
 const REQUEST_TIMEOUT = 30000 // 30 seconds
 
 interface Data {
   userId: string
   url: string
+  finalUrl: string
   articleSavingRequestId: string
+  title: string
+  contentType: string
+  savedAt: string
+
   state?: string
   labels?: CreateLabelInput[]
   source: string
   folder: string
   rssFeedUrl?: string
-  savedAt?: string
   publishedAt?: string
   taskId?: string
-}
-
-interface UploadFileResponse {
-  data: {
-    uploadFileRequest: {
-      id: string
-      uploadSignedUrl: string
-      uploadFileId: string
-      createdPageId: string
-      errorCodes?: string[]
-    }
-  }
-}
-
-interface CreateArticleResponse {
-  data: {
-    createArticle: {
-      createdArticle: {
-        id: string
-      }
-      errorCodes: string[]
-    }
-  }
+  cacheKey?: string
 }
 
 interface FetchResult {
@@ -63,93 +52,28 @@ interface FetchResult {
   title?: string
   content?: string
   contentType?: string
-  readabilityResult?: Readability.ParseResult
 }
 
 const isFetchResult = (obj: unknown): obj is FetchResult => {
   return typeof obj === 'object' && obj !== null && 'finalUrl' in obj
 }
 
-const uploadToSignedUrl = async (
-  uploadSignedUrl: string,
-  contentType: string,
-  contentObjUrl: string
-) => {
-  try {
-    const stream = await axios.get(contentObjUrl, {
-      responseType: 'stream',
-      timeout: REQUEST_TIMEOUT,
-    })
-    return await axios.put(uploadSignedUrl, stream.data, {
-      headers: {
-        'Content-Type': contentType,
-      },
-      maxBodyLength: 1000000000,
-      maxContentLength: 100000000,
-      timeout: REQUEST_TIMEOUT,
-    })
-  } catch (error) {
-    console.error('error uploading to signed url', error)
-    return null
+const getCachedContent = async (key: string): Promise<string | undefined> => {
+  const result = await redisDataSource.redisClient?.get(key)
+  if (!result) {
+    logger.info('fetch result is not cached', { key })
+    return undefined
   }
-}
 
-const getUploadIdAndSignedUrl = async (
-  userId: string,
-  url: string,
-  articleSavingRequestId: string
-) => {
-  const auth = await signToken({ uid: userId }, JWT_SECRET)
-  const data = JSON.stringify({
-    query: `mutation UploadFileRequest($input: UploadFileRequestInput!) {
-      uploadFileRequest(input:$input) {
-        ... on UploadFileRequestError {
-          errorCodes
-        }
-        ... on UploadFileRequestSuccess {
-          id
-          uploadSignedUrl
-        }
-      }
-    }`,
-    variables: {
-      input: {
-        url: encodeURI(url),
-        contentType: 'application/pdf',
-        clientRequestId: articleSavingRequestId,
-      },
-    },
-  })
-
-  try {
-    const response = await axios.post<UploadFileResponse>(
-      `${REST_BACKEND_ENDPOINT}/graphql`,
-      data,
-      {
-        headers: {
-          Cookie: `auth=${auth as string};`,
-          'Content-Type': 'application/json',
-        },
-        timeout: REQUEST_TIMEOUT,
-      }
-    )
-
-    if (
-      response.data.data.uploadFileRequest.errorCodes &&
-      response.data.data.uploadFileRequest.errorCodes?.length > 0
-    ) {
-      console.error(
-        'Error while getting upload id and signed url',
-        response.data.data.uploadFileRequest.errorCodes[0]
-      )
-      return null
-    }
-
-    return response.data.data.uploadFileRequest
-  } catch (e) {
-    console.error('error getting upload id and signed url', e)
-    return null
+  const fetchResult = JSON.parse(result) as unknown
+  if (!isFetchResult(fetchResult)) {
+    logger.error('invalid fetch result in cache', { key })
+    return undefined
   }
+
+  logger.info('fetch result is cached', { key })
+
+  return fetchResult.content
 }
 
 const uploadPdf = async (
@@ -157,73 +81,42 @@ const uploadPdf = async (
   userId: string,
   articleSavingRequestId: string
 ) => {
-  const uploadResult = await getUploadIdAndSignedUrl(
-    userId,
-    url,
-    articleSavingRequestId
+  const result = await uploadFile(
+    {
+      url,
+      contentType: 'application/pdf',
+      clientRequestId: articleSavingRequestId,
+      createPageEntry: true,
+    },
+    userId
   )
-  if (!uploadResult) {
+  if (!result.uploadSignedUrl || !result.createdPageId) {
     throw new Error('error while getting upload id and signed url')
   }
-  const uploaded = await uploadToSignedUrl(
-    uploadResult.uploadSignedUrl,
-    'application/pdf',
-    url
-  )
-  if (!uploaded) {
-    throw new Error('error while uploading pdf')
-  }
-  return uploadResult.id
-}
 
-const sendCreateArticleMutation = async (userId: string, input: unknown) => {
-  const data = JSON.stringify({
-    query: `mutation CreateArticle ($input: CreateArticleInput!){
-          createArticle(input:$input){
-            ... on CreateArticleSuccess{
-              createdArticle{
-                id
-            }
-        }
-          ... on CreateArticleError{
-              errorCodes
-          }
-      }
-    }`,
-    variables: {
-      input,
-    },
+  logger.info('downloading content', {
+    url,
   })
 
-  const auth = await signToken({ uid: userId }, JWT_SECRET)
-  try {
-    const response = await axios.post<CreateArticleResponse>(
-      `${REST_BACKEND_ENDPOINT}/graphql`,
-      data,
-      {
-        headers: {
-          Cookie: `auth=${auth as string};`,
-          'Content-Type': 'application/json',
-        },
-        timeout: REQUEST_TIMEOUT,
-      }
-    )
+  const data = await downloadFromUrl(url, REQUEST_TIMEOUT)
 
-    if (
-      response.data.data.createArticle.errorCodes &&
-      response.data.data.createArticle.errorCodes.length > 0
-    ) {
-      console.error(
-        'error while creating article',
-        response.data.data.createArticle.errorCodes[0]
-      )
-      return null
-    }
+  const uploadSignedUrl = result.uploadSignedUrl
+  const contentType = 'application/pdf'
+  logger.info('uploading to signed url', {
+    uploadSignedUrl,
+    contentType,
+  })
+  await uploadToSignedUrl(uploadSignedUrl, data, contentType, REQUEST_TIMEOUT)
 
-    return response.data.data.createArticle
-  } catch (error) {
-    console.error('error creating article', error)
-    return null
+  logger.info('pdf uploaded successfully', {
+    url,
+    uploadFileId: result.id,
+    itemId: result.createdPageId,
+  })
+
+  return {
+    uploadFileId: result.id,
+    itemId: result.createdPageId,
   }
 }
 
@@ -233,6 +126,7 @@ const sendImportStatusUpdate = async (
   isImported?: boolean
 ) => {
   try {
+    logger.info('sending import status update')
     const auth = await signToken({ uid: userId }, JWT_SECRET)
 
     await axios.post(
@@ -246,33 +140,12 @@ const sendImportStatusUpdate = async (
           Authorization: auth as string,
           'Content-Type': 'application/json',
         },
-        timeout: REQUEST_TIMEOUT,
+        timeout: 5000,
       }
     )
   } catch (e) {
-    console.error('error while sending import status update', e)
+    logError(e)
   }
-}
-
-const getCachedFetchResult = async (url: string) => {
-  const key = `fetch-result:${url}`
-  if (!redisDataSource.redisClient) {
-    throw new Error('redis client is not initialized')
-  }
-
-  const result = await redisDataSource.redisClient.get(key)
-  if (!result) {
-    throw new Error('fetch result is not cached')
-  }
-
-  const fetchResult = JSON.parse(result) as unknown
-  if (!isFetchResult(fetchResult)) {
-    throw new Error('fetch result is not valid')
-  }
-
-  console.log('fetch result is cached', url)
-
-  return fetchResult
 }
 
 export const savePageJob = async (data: Data, attemptsMade: number) => {
@@ -287,38 +160,56 @@ export const savePageJob = async (data: Data, attemptsMade: number) => {
     publishedAt,
     taskId,
     url,
+    finalUrl,
+    title,
+    contentType,
+    state,
+    cacheKey,
   } = data
-  let isImported,
-    isSaved,
-    state = data.state
+  let isImported, isSaved
+
+  logger.info('savePageJob', {
+    userId,
+    url,
+    finalUrl,
+  })
+
+  const user = await userRepository.findById(userId)
+  if (!user) {
+    logger.error('Unable to save job, user can not be found.', {
+      userId,
+      url,
+    })
+    // if the user is not found, we do not retry
+    return false
+  }
 
   try {
-    console.log(`savePageJob: ${userId} ${url}`)
-
-    // get the fetch result from cache
-    const fetchedResult = await getCachedFetchResult(url)
-    const { title, contentType, readabilityResult } = fetchedResult
-    let content = fetchedResult.content
-
     // for pdf content, we need to upload the pdf
     if (contentType === 'application/pdf') {
-      const encodedUrl = encodeURI(url)
+      const uploadResult = await uploadPdf(
+        finalUrl,
+        userId,
+        articleSavingRequestId
+      )
 
-      const uploadFileId = await uploadPdf(url, userId, articleSavingRequestId)
-      const uploadedPdf = await sendCreateArticleMutation(userId, {
-        url: encodedUrl,
-        articleSavingRequestId,
-        uploadFileId,
-        state,
-        labels,
-        source,
-        folder,
-        rssFeedUrl,
-        savedAt,
-        publishedAt,
-      })
-      if (!uploadedPdf) {
-        throw new Error('error while saving uploaded pdf')
+      const result = await saveFile(
+        {
+          url: finalUrl,
+          uploadFileId: uploadResult.uploadFileId,
+          state: (state as ArticleSavingRequestStatus) || undefined,
+          labels,
+          source,
+          folder,
+          subscription: rssFeedUrl,
+          savedAt,
+          publishedAt,
+          clientRequestId: uploadResult.itemId,
+        },
+        user
+      )
+      if (result.__typename == 'SaveError') {
+        throw new Error(result.message || result.errorCodes[0])
       }
 
       isSaved = true
@@ -326,34 +217,59 @@ export const savePageJob = async (data: Data, attemptsMade: number) => {
       return true
     }
 
-    if (!content) {
-      console.log('content is not fetched', url)
-      // set the state to failed if we don't have content
-      content = 'Failed to fetch content'
-      state = ArticleSavingRequestStatus.Failed
-    }
+    let content
 
-    const user = await userRepository.findById(userId)
-    if (!user) {
-      logger.error('Unable to save job, user can not be found.', {
-        userId,
-        url,
+    if (cacheKey) {
+      logger.info('fetching content from cache', {
+        cacheKey,
       })
-      throw new Error('Unable to save job, user can not be found.')
+      content = await getCachedContent(cacheKey)
+
+      if (content) {
+        logger.info('fetched content from cache')
+      }
     }
 
-    // for non-pdf content, we need to save the page
+    if (!content) {
+      logger.info(
+        'content not found from cache, downloading content from GCS',
+        {
+          url,
+        }
+      )
+
+      // download the original content
+      const filePath = contentFilePath({
+        userId,
+        libraryItemId: articleSavingRequestId,
+        format: 'original',
+        savedAt: new Date(savedAt),
+      })
+      const exists = await isFileExists(filePath)
+      if (!exists) {
+        logger.error('Original content file does not exist', {
+          finalUrl,
+          filePath,
+        })
+
+        throw new Error('Original content file does not exist')
+      }
+
+      content = (await downloadFromBucket(filePath)).toString()
+      logger.info('Downloaded original content from:', { filePath })
+    }
+
+    // for non-pdf content, we need to save the content
     const result = await savePage(
       {
-        url,
+        url: finalUrl,
         clientRequestId: articleSavingRequestId,
         title,
         originalContent: content,
-        parseResult: readabilityResult,
-        state: state ? (state as ArticleSavingRequestStatus) : undefined,
-        labels: labels,
+        state: (state as ArticleSavingRequestStatus) || undefined,
+        labels,
         rssFeedUrl,
-        savedAt: savedAt ? new Date(savedAt) : new Date(),
+        savedAt,
         publishedAt: publishedAt ? new Date(publishedAt) : null,
         source,
         folder,
@@ -361,29 +277,21 @@ export const savePageJob = async (data: Data, attemptsMade: number) => {
       user
     )
 
-    // if (result.__typename == 'SaveError') {
-    //   logger.error('Error saving page', { userId, url, result })
-    //   throw new Error('Error saving page')
-    // }
+    if (result.__typename == 'SaveError') {
+      throw new Error(result.message || result.errorCodes[0])
+    }
 
-    // if the readability result is not parsed, the import is failed
-    isImported = !!readabilityResult
+    isImported = true
     isSaved = true
   } catch (e) {
-    if (e instanceof Error) {
-      console.error('error while saving page', e.message)
-    } else {
-      console.error('error while saving page', 'unknown error')
-    }
+    logError(e)
 
     throw e
   } finally {
-    const lastAttempt = attemptsMade === MAX_ATTEMPTS - 1
-    if (lastAttempt) {
-      console.log('last attempt reached', data.url)
-    }
+    const lastAttempt = attemptsMade + 1 >= MAX_IMPORT_ATTEMPTS
 
     if (taskId && (isSaved || lastAttempt)) {
+      logger.info('sending import status update')
       // send import status to update the metrics for importer
       await sendImportStatusUpdate(userId, taskId, isImported)
     }

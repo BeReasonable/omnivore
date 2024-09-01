@@ -9,6 +9,12 @@ export enum SubscriptionType {
   NEWSLETTER = 'NEWSLETTER',
 }
 
+export enum FetchContentType {
+  ALWAYS = 'ALWAYS',
+  NEVER = 'NEVER',
+  WHEN_EMPTY = 'WHEN_EMPTY',
+}
+
 export type Subscription = {
   id: string
   name: string
@@ -16,15 +22,28 @@ export type Subscription = {
   newsletterEmail?: string
 
   url?: string
+  icon?: string
   description?: string
 
   status: SubscriptionStatus
   createdAt: string
   updatedAt: string
   lastFetchedAt?: string
-  autoAddToLibrary?: boolean
-  isPrivate?: boolean
-}
+  mostRecentItemDate?: string
+  failedAt?: string
+
+  fetchContentType?: FetchContentType
+} & (
+  | {
+      type: SubscriptionType.NEWSLETTER
+      unsubscribeMailTo?: string
+      unsubscribeHttpUrl?: string
+    }
+  | {
+      type: SubscriptionType.RSS
+      url: string
+    }
+)
 
 type SubscriptionsQueryResponse = {
   error: any
@@ -56,6 +75,7 @@ export function useGetSubscriptionsQuery(
             type
             newsletterEmail
             url
+            icon
             description
             status
             unsubscribeMailTo
@@ -63,8 +83,9 @@ export function useGetSubscriptionsQuery(
             createdAt
             updatedAt
             lastFetchedAt
-            autoAddToLibrary
-            isPrivate
+            fetchContentType
+            mostRecentItemDate
+            failedAt
           }
         }
         ... on SubscriptionsError {
@@ -82,7 +103,8 @@ export function useGetSubscriptionsQuery(
   }
   const { data, error, mutate, isValidating } = useSWR(
     [query, variables],
-    makeGqlFetcher(variables)
+    makeGqlFetcher(query, variables),
+    {}
   )
 
   try {

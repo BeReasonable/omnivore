@@ -4,14 +4,16 @@ import { Button } from '../../elements/Button'
 import { StyledText } from '../../elements/StyledText'
 import { styled, theme } from '../../tokens/stitches.config'
 import { Label } from '../../../lib/networking/fragments/labelFragment'
-import { useGetLabelsQuery } from '../../../lib/networking/queries/useGetLabelsQuery'
-import { Check, Circle, Plus, WarningCircle } from 'phosphor-react'
-import { createLabelMutation } from '../../../lib/networking/mutations/createLabelMutation'
+import { Check, Circle, Plus, WarningCircle } from '@phosphor-icons/react'
 import { showErrorToast, showSuccessToast } from '../../../lib/toastHelpers'
 import { randomLabelColorHex } from '../../../utils/settings-page/labels/labelColorObjects'
 import { useRouter } from 'next/router'
 import { LabelsPicker } from '../../elements/LabelsPicker'
 import { LabelsDispatcher } from '../../../lib/hooks/useSetPageLabels'
+import {
+  useCreateLabel,
+  useGetLabels,
+} from '../../../lib/networking/labels/useLabels'
 
 export interface LabelsProvider {
   labels?: Label[]
@@ -241,7 +243,7 @@ function Footer(props: FooterProps): JSX.Element {
             alignment="center"
             distribution="start"
             css={{ gap: '8px', fontSize: '12px', pointer: 'cursor' }}
-            onClick={async (event) => {
+            onClick={async () => {
               switch (textMatch) {
                 case 'available':
                   await props.selectEnteredLabel()
@@ -282,10 +284,10 @@ function Footer(props: FooterProps): JSX.Element {
 }
 
 export function SetLabelsControl(props: SetLabelsControlProps): JSX.Element {
-  const router = useRouter()
   const { inputValue, setInputValue, selectedLabels, setHighlightLastLabel } =
     props
-  const { labels, revalidate } = useGetLabelsQuery()
+  const { data: labels } = useGetLabels()
+  const createLabel = useCreateLabel()
   // Move focus through the labels list on tab or arrow up/down keys
   const [focusedIndex, setFocusedIndex] = useState<number | undefined>(0)
 
@@ -321,9 +323,8 @@ export function SetLabelsControl(props: SetLabelsControlProps): JSX.Element {
       props.dispatchLabels({ type: 'SAVE', labels: newSelectedLabels })
 
       props.clearInputState()
-      revalidate()
     },
-    [isSelected, props, revalidate]
+    [isSelected, props]
   )
 
   const filteredLabels = useMemo(() => {
@@ -342,11 +343,11 @@ export function SetLabelsControl(props: SetLabelsControlProps): JSX.Element {
   const createLabelFromFilterText = useCallback(
     async (text: string) => {
       const trimmedLabelName = text.trim()
-      const label = await createLabelMutation(
-        trimmedLabelName,
-        randomLabelColorHex(),
-        ''
-      )
+      const label = await createLabel.mutateAsync({
+        name: trimmedLabelName,
+        color: randomLabelColorHex(),
+        description: undefined,
+      })
       if (label) {
         showSuccessToast(`Created label ${label.name}`, {
           position: 'bottom-right',
@@ -414,7 +415,6 @@ export function SetLabelsControl(props: SetLabelsControlProps): JSX.Element {
       filteredLabels,
       focusedIndex,
       createLabelFromFilterText,
-      router,
       toggleLabel,
     ]
   )
@@ -423,17 +423,17 @@ export function SetLabelsControl(props: SetLabelsControlProps): JSX.Element {
     const _filterText = inputValue
     setInputValue('')
     return createLabelFromFilterText(_filterText)
-  }, [inputValue])
+  }, [inputValue, setInputValue, createLabelFromFilterText])
 
   const selectEnteredLabel = useCallback(() => {
-    const label = labels.find(
+    const label = labels?.find(
       (l: Label) => l.name.toLowerCase() == inputValue.toLowerCase()
     )
     if (!label) {
       return Promise.resolve()
     }
     return toggleLabel(label)
-  }, [labels, inputValue])
+  }, [labels, inputValue, toggleLabel])
 
   return (
     <VStack
@@ -510,7 +510,7 @@ export function SetLabelsControl(props: SetLabelsControlProps): JSX.Element {
         <Footer
           filterText={inputValue}
           selectedLabels={props.selectedLabels}
-          availableLabels={labels}
+          availableLabels={labels ?? []}
           focused={focusedIndex === filteredLabels.length + 1}
           createEnteredLabel={createEnteredLabel}
           selectEnteredLabel={selectEnteredLabel}

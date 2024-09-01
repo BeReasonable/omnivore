@@ -12,13 +12,19 @@ import { User } from './user'
 export enum RuleActionType {
   AddLabel = 'ADD_LABEL',
   Archive = 'ARCHIVE',
+  Delete = 'DELETE',
   MarkAsRead = 'MARK_AS_READ',
   SendNotification = 'SEND_NOTIFICATION',
+  Webhook = 'WEBHOOK',
+  Export = 'EXPORT',
 }
 
 export enum RuleEventType {
   PageCreated = 'PAGE_CREATED',
   PageUpdated = 'PAGE_UPDATED',
+  LabelCreated = 'LABEL_CREATED',
+  HighlightCreated = 'HIGHLIGHT_CREATED',
+  HighlightUpdated = 'HIGHLIGHT_UPDATED',
 }
 
 export interface RuleAction {
@@ -58,4 +64,7 @@ export class Rule {
 
   @UpdateDateColumn({ default: () => 'CURRENT_TIMESTAMP' })
   updatedAt!: Date
+
+  @Column('timestamptz')
+  failedAt?: Date
 }

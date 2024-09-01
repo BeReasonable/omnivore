@@ -1,4 +1,3 @@
-
 import Foundation
 
 import CoreData
@@ -100,6 +99,11 @@ import Views
   }
 
   func loadItems(dataService: DataService, filterState: FetcherFilterState, isRefresh: Bool, forceRemote: Bool = false) async {
+    if isRefresh {
+      cursor = nil
+      limit = 5
+    }
+
     await withTaskGroup(of: Void.self) { group in
       group.addTask { await self.loadCurrentViewer(dataService: dataService) }
       group.addTask { await self.loadLabels(dataService: dataService) }
@@ -110,6 +114,7 @@ import Views
     if let appliedFilter = filterState.appliedFilter {
       let shouldRemoteSearch = forceRemote || items.count < 1 || isRefresh && appliedFilter.shouldRemoteSearch
       if shouldRemoteSearch {
+        updateFetchController(dataService: dataService, filterState: filterState)
         await loadSearchQuery(dataService: dataService, filterState: filterState, isRefresh: isRefresh)
       } else {
         updateFetchController(dataService: dataService, filterState: filterState)
@@ -165,7 +170,7 @@ import Views
     var subPredicates = [NSPredicate]()
 
     // TODO: FOLLOWING MIGRATION: invert this once the following migration has completed
-    if !UserDefaults.standard.bool(forKey: "LibraryTabView::hideFollowingTab") {
+    if !(filterState.appliedFilter?.ignoreFolders ?? false), !UserDefaults.standard.bool(forKey: "LibraryTabView::hideFollowingTab") {
       let folderPredicate = NSPredicate(
         format: "%K == %@", #keyPath(Models.LibraryItem.folder), filterState.folder
       )

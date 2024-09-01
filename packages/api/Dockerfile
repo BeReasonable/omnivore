@@ -16,6 +16,7 @@ COPY /packages/api/package.json ./packages/api/package.json
 COPY /packages/text-to-speech/package.json ./packages/text-to-speech/package.json
 COPY /packages/content-handler/package.json ./packages/content-handler/package.json
 COPY /packages/liqe/package.json ./packages/liqe/package.json
+COPY /packages/utils/package.json ./packages/utils/package.json
 
 RUN yarn install --pure-lockfile
 
@@ -24,7 +25,9 @@ ADD /packages/api ./packages/api
 ADD /packages/text-to-speech ./packages/text-to-speech
 ADD /packages/content-handler ./packages/content-handler
 ADD /packages/liqe ./packages/liqe
+ADD /packages/utils ./packages/utils
 
+RUN yarn workspace @omnivore/utils build
 RUN yarn workspace @omnivore/text-to-speech-handler build
 RUN yarn workspace @omnivore/content-handler build
 RUN yarn workspace @omnivore/liqe build
@@ -36,6 +39,7 @@ RUN rm -rf /app/node_modules
 RUN yarn install --pure-lockfile --production
 
 FROM node:18.16 as runner
+LABEL org.opencontainers.image.source="https://github.com/omnivore-app/omnivore"
 
 RUN apt-get update && apt-get install -y netcat-openbsd
 
@@ -54,6 +58,7 @@ COPY --from=builder /app/package.json /app/package.json
 COPY --from=builder /app/packages/text-to-speech/ /app/packages/text-to-speech/
 COPY --from=builder /app/packages/content-handler/ /app/packages/content-handler/
 COPY --from=builder /app/packages/liqe/ /app/packages/liqe/
+COPY --from=builder /app/packages/utils/ /app/packages/utils/
 EXPOSE 8080
 
 CMD ["yarn", "workspace", "@omnivore/api", "start"]

@@ -1,21 +1,12 @@
 import { useRouter } from 'next/router'
-import {
-  useGetArticleQuery,
-  ArticleAttributes,
-} from '../../../lib/networking/queries/useGetArticleQuery'
 import { applyStoredTheme } from '../../../lib/themeUpdater'
 import { useMemo } from 'react'
-import {
-  EmptySettingsRow,
-  SettingsTable,
-  SettingsTableRow,
-} from '../../../components/templates/settings/SettingsTable'
-import { StyledText } from '../../../components/elements/StyledText'
 import {
   Box,
   HStack,
   SpanBox,
 } from '../../../components/elements/LayoutPrimitives'
+import { useGetLibraryItemContent } from '../../../lib/networking/library_items/useLibraryItems'
 
 type ArticleAttribute = {
   name: string
@@ -24,13 +15,12 @@ type ArticleAttribute = {
 
 export default function Debug(): JSX.Element {
   const router = useRouter()
-  const { articleData, articleFetchError, isLoading } = useGetArticleQuery({
-    username: router.query.username as string,
-    slug: router.query.slug as string,
-    includeFriendsHighlights: false,
-  })
+  const { data: article } = useGetLibraryItemContent(
+    router.query.username as string,
+    router.query.slug as string
+  )
 
-  applyStoredTheme(false)
+  applyStoredTheme()
 
   const sortedAttributes = useMemo(() => {
     // if (!sortedAttributes) {
@@ -39,12 +29,10 @@ export default function Debug(): JSX.Element {
     // return sortedAttributes.sort((a, b) =>
     //   a.createdAt.localeCompare(b.createdAt)
     // )
-    if (!articleData?.article.article) {
+    if (!article) {
       return []
     }
     const result: ArticleAttribute[] = []
-
-    const article = articleData.article.article
 
     result.push({ name: 'id', value: article.id })
     result.push({ name: 'linkId', value: article.linkId })
@@ -62,12 +50,12 @@ export default function Debug(): JSX.Element {
       value: article.originalArticleUrl,
     })
     result.push({ name: 'author', value: article.author ?? 'null' })
+    result.push({ name: 'siteName', value: article.siteName ?? 'null' })
+
     result.push({ name: 'image', value: article.image ?? 'null' })
     result.push({ name: 'savedAt', value: article.savedAt })
     result.push({ name: 'createdAt', value: article.createdAt })
     result.push({ name: 'publishedAt', value: article.publishedAt ?? 'null' })
-
-    result.push({ name: 'isArchived', value: article.isArchived.toString() })
     result.push({ name: 'description', value: article.description ?? 'null' })
 
     result.push({
@@ -115,7 +103,7 @@ export default function Debug(): JSX.Element {
       })
     })
 
-    article.highlights.forEach((highlight, idx) => {
+    article.highlights?.forEach((highlight, idx) => {
       result.push({ name: `highlight[${idx}].id`, value: highlight.id })
       result.push({ name: `highlight[${idx}].type`, value: highlight.type })
       result.push({
@@ -182,7 +170,7 @@ export default function Debug(): JSX.Element {
     // recommendations?: Recommendation[]
 
     return result
-  }, [articleData])
+  }, [article])
 
   return (
     <>

@@ -3,9 +3,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import * as jwt from 'jsonwebtoken'
 import jwksClient from 'jwks-rsa'
+import { StatusType } from '../../entity/user'
 import { env, homePageURL } from '../../env'
 import { LoginErrorCode } from '../../generated/graphql'
 import { userRepository } from '../../repository/user'
+import { analytics } from '../../utils/analytics'
 import { logger } from '../../utils/logger'
 import { createSsoToken, ssoRedirectURL } from '../../utils/sso'
 import { DecodeTokenResult } from './auth_types'
@@ -14,8 +16,7 @@ import {
   createWebAuthToken,
   suggestedUsername,
 } from './jwt_helpers'
-import { analytics } from '../../utils/analytics'
-import { StatusType } from '../../entity/user'
+import { DEFAULT_HOME_PATH } from '../../utils/navigation'
 
 const appleBaseURL = 'https://appleid.apple.com'
 const audienceName = 'app.omnivore.app'
@@ -142,13 +143,16 @@ export async function handleAppleWebAuth(
 
     const authToken = await createWebAuthToken(userId)
     if (authToken) {
-      const ssoToken = createSsoToken(authToken, `${baseURL()}/home`)
+      const ssoToken = createSsoToken(
+        authToken,
+        `${baseURL()}${DEFAULT_HOME_PATH}`
+      )
       const redirectURL = isVercel
         ? ssoRedirectURL(ssoToken)
-        : `${baseURL()}/home`
+        : `${baseURL()}${DEFAULT_HOME_PATH}`
 
-      analytics.track({
-        userId: user.id,
+      analytics.capture({
+        distinctId: user.id,
         event: 'login',
         properties: {
           method: 'apple',

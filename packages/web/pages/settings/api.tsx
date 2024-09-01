@@ -28,7 +28,7 @@ export default function Api(): JSX.Element {
   const neverExpiresDate = new Date(8640000000000000)
   const defaultExpiresAt = 'Never'
 
-  applyStoredTheme(false)
+  applyStoredTheme()
 
   async function onDelete(id: string): Promise<void> {
     const result = await revokeApiKeyMutation(id)
@@ -119,21 +119,6 @@ export default function Api(): JSX.Element {
         setName('')
         setExpiresAt(neverExpiresDate)
         setAddModalOpen(true)
-      }}
-      suggestionInfo={{
-        title:
-          'Use API keys to Integrate Omnivore with other apps and services',
-        message:
-          'Create API keys to connect Omnivore to other apps such as Logseq and Obsidian or to query the API. Check out the integrations documentation for more info on connecting to Omnivore via the API.',
-        docs: 'https://docs.omnivore.app/integrations/api.html',
-        key: '--settings-apikeys-show-help',
-        CTAText: 'Create an API Key',
-        onClickCTA: () => {
-          onAdd()
-          setName('')
-          setExpiresAt(neverExpiresDate)
-          setAddModalOpen(true)
-        },
       }}
     >
       {sortedApiKeys.length > 0 ? (

@@ -54,7 +54,7 @@ import Utils
     @State private var showAnnotationModal = false
     @State private var showSettingsModal = false
 
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.presentationCoordinator) var presentationCoordinator
 
     init(viewModel: PDFViewerViewModel) {
       self.viewModel = viewModel
@@ -332,7 +332,7 @@ import Utils
             if let customHighlight = annotation.customData?["omnivoreHighlight"] as? [String: String] {
               if customHighlight["id"]?.lowercased() == highlightId {
                 if !document.remove(annotations: [annotation]) {
-                  viewModel.snackbar(message: "Error removing highlight")
+                  Snackbar.show(message: "Error removing highlight", dismissAfter: 2000)
                 }
               }
             }
@@ -479,7 +479,7 @@ import Utils
 
       @objc public func pop() {
         if let viewer = self.viewer {
-          viewer.dismiss()
+          viewer.presentationCoordinator.dismiss()
         }
       }
 

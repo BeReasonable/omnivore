@@ -1,6 +1,8 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-base-to-string */
+
 import { preParseContent } from '@omnivore/content-handler'
 import { Readability } from '@omnivore/readability'
 import addressparser from 'addressparser'
@@ -14,15 +16,17 @@ import { NodeHtmlMarkdown, TranslatorConfigObject } from 'node-html-markdown'
 import { ElementNode } from 'node-html-markdown/dist/nodes'
 import Parser from 'rss-parser'
 import { parser } from 'sax'
+import showdown from 'showdown'
 import { ILike } from 'typeorm'
 import { promisify } from 'util'
 import { v4 as uuid } from 'uuid'
-import { Highlight } from '../entity/highlight'
+import { Highlight, HighlightType } from '../entity/highlight'
 import { StatusType } from '../entity/user'
 import { env } from '../env'
 import { PageType, PreparedDocumentInput } from '../generated/graphql'
 import { userRepository } from '../repository/user'
 import { ArticleFormat } from '../resolvers/article'
+import { generateFingerprint } from './helpers'
 import {
   EmbeddedHighlightData,
   findEmbeddedHighlight,
@@ -31,7 +35,7 @@ import {
   makeHighlightNodeAttributes,
 } from './highlightGenerator'
 import { createImageProxyUrl } from './imageproxy'
-import { buildLogger, LogRecord } from './logger'
+import { logger, LogRecord } from './logger'
 
 interface Feed {
   title: string
@@ -41,7 +45,6 @@ interface Feed {
   description?: string
 }
 
-const logger = buildLogger('utils.parse')
 const signToken = promisify(jwt.sign)
 
 const axiosInstance = axios.create({
@@ -75,15 +78,17 @@ const DOM_PURIFY_CONFIG = {
 const ARTICLE_PREFIX = 'omnivore:'
 
 export const FAKE_URL_PREFIX = 'https://omnivore.app/no_url?q='
-export const RSS_PARSER_CONFIG = {
-  timeout: 5000, // 5 seconds
-  headers: {
-    // some rss feeds require user agent
-    'User-Agent':
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
-    Accept:
-      'application/rss+xml, application/rdf+xml;q=0.8, application/atom+xml;q=0.6, application/xml;q=0.4, text/xml;q=0.4, text/html;q=0.2',
-  },
+export const rssParserConfig = () => {
+  const fingerprint = generateFingerprint()
+
+  return {
+    headers: {
+      'user-agent': fingerprint.headers['user-agent'],
+      accept:
+        'application/rss+xml, application/rdf+xml;q=0.8, application/atom+xml;q=0.6, application/xml;q=0.4, text/xml;q=0.4, text/html;q=0.2',
+    },
+    timeout: 20000, // 20 seconds
+  }
 }
 
 /** Hook that prevents DOMPurify from removing youtube iframes */
@@ -223,7 +228,6 @@ const getReadabilityResult = async (
 export const parsePreparedContent = async (
   url: string,
   preparedDocument: PreparedDocumentInput,
-  parseResult?: Readability.ParseResult | null,
   isNewsletter?: boolean,
   allowRetry = true
 ): Promise<ParsedContentPuppeteer> => {
@@ -232,12 +236,8 @@ export const parsePreparedContent = async (
     labels: { source: 'parsePreparedContent' },
   }
 
-  // If we have a parse result, use it
-  let article = parseResult || null
-  let highlightData = undefined
-  const { document, pageInfo } = preparedDocument
-
-  if (!document) {
+  const { document: domContent, pageInfo } = preparedDocument
+  if (!domContent) {
     logger.info('No document')
     return {
       canonicalUrl: url,
@@ -257,142 +257,147 @@ export const parsePreparedContent = async (
     return {
       canonicalUrl: url,
       parsedContent: null,
-      domContent: document,
+      domContent,
       pageType: PageType.Unknown,
     }
   }
 
-  let dom: Document | null = null
+  const { title: pageInfoTitle, canonicalUrl } = pageInfo
+
+  let parsedContent: Readability.ParseResult | null = null
+  let pageType = PageType.Unknown
+  let highlightData = undefined
 
   try {
-    dom = parseHTML(document).document
+    const document = parseHTML(domContent).document
+    pageType = parseOriginalContent(document)
 
-    if (!article) {
-      // Attempt to parse the article
-      // preParse content
-      dom = (await preParseContent(url, dom)) || dom
+    // Run readability
+    await preParseContent(url, document)
 
-      article = await getReadabilityResult(url, document, dom, isNewsletter)
-    }
+    parsedContent = await getReadabilityResult(
+      url,
+      domContent,
+      document,
+      isNewsletter
+    )
 
-    if (!article?.textContent && allowRetry) {
-      const newDocument = {
-        ...preparedDocument,
-        document: '<html><body>' + document + '</body></html>', // wrap in body
+    if (!parsedContent || !parsedContent.content) {
+      logger.info('No parsed content')
+
+      if (allowRetry) {
+        logger.info('Retrying with content wrapped in html body')
+
+        const newDocument = {
+          ...preparedDocument,
+          document: '<html><body>' + domContent + '</body></html>', // wrap in body
+        }
+        return parsePreparedContent(url, newDocument, isNewsletter, false)
       }
-      return parsePreparedContent(
-        url,
-        newDocument,
-        parseResult,
-        isNewsletter,
-        false
-      )
+
+      return {
+        canonicalUrl,
+        parsedContent,
+        domContent,
+        pageType,
+      }
     }
 
+    // use title if not found after running readability
+    if (!parsedContent.title && pageInfoTitle) {
+      parsedContent.title = pageInfoTitle
+    }
+
+    const newDocumentElement = parsedContent.documentElement
     // Format code blocks
     // TODO: we probably want to move this type of thing
     // to the handlers, and have some concept of postHandle
-    if (article?.content) {
-      const articleDom = parseHTML(article.content).document
-      const codeBlocks = articleDom.querySelectorAll(
-        'code, pre[class^="prism-"], pre[class^="language-"]'
-      )
-      if (codeBlocks.length > 0) {
-        codeBlocks.forEach((e) => {
-          if (e.textContent) {
-            const att = hljs.highlightAuto(e.textContent)
-            const code = articleDom.createElement('code')
-            const langClass =
-              `hljs language-${att.language}` +
-              (att.second_best?.language
-                ? ` language-${att.second_best?.language}`
-                : '')
-            code.setAttribute('class', langClass)
-            code.innerHTML = att.value
-            e.replaceWith(code)
-          }
+    const codeBlocks = newDocumentElement.querySelectorAll(
+      'pre[class^="prism-"], pre[class^="language-"], code'
+    )
+    codeBlocks.forEach((e) => {
+      if (!e.textContent) {
+        return e.parentNode?.removeChild(e)
+      }
+
+      // replace <br> or <p> or </p> with \n
+      e.innerHTML = e.innerHTML.replace(/<(br|p|\/p)>/g, '\n')
+
+      const att = hljs.highlightAuto(e.textContent)
+      const code = document.createElement('code')
+      const langClass =
+        `hljs language-${att.language}` +
+        (att.second_best?.language
+          ? ` language-${att.second_best?.language}`
+          : '')
+      code.setAttribute('class', langClass)
+      code.innerHTML = att.value
+      e.replaceWith(code)
+    })
+
+    highlightData = findEmbeddedHighlight(newDocumentElement)
+
+    const ANCHOR_ELEMENTS_BLOCKED_ATTRIBUTES = [
+      'omnivore-highlight-id',
+      'data-twitter-tweet-id',
+      'data-instagram-id',
+    ]
+
+    // Get the top level element?
+    // const pageNode = newDocumentElement.firstElementChild as HTMLElement
+    const nodesToVisitStack: [HTMLElement] = [newDocumentElement]
+    const visitedNodeList = []
+
+    while (nodesToVisitStack.length > 0) {
+      const currentNode = nodesToVisitStack.pop()
+      if (
+        currentNode?.nodeType !== 1 ||
+        // Avoiding dynamic elements from being counted as anchor-allowed elements
+        ANCHOR_ELEMENTS_BLOCKED_ATTRIBUTES.some((attrib) =>
+          currentNode.hasAttribute(attrib)
+        )
+      ) {
+        continue
+      }
+      visitedNodeList.push(currentNode)
+      ;[].slice
+        .call(currentNode.childNodes)
+        .reverse()
+        .forEach(function (node) {
+          nodesToVisitStack.push(node)
         })
-        article.content = articleDom.documentElement.outerHTML
-      }
-
-      highlightData = findEmbeddedHighlight(articleDom.documentElement)
-
-      const ANCHOR_ELEMENTS_BLOCKED_ATTRIBUTES = [
-        'omnivore-highlight-id',
-        'data-twitter-tweet-id',
-        'data-instagram-id',
-      ]
-
-      // Get the top level element?
-      const pageNode = articleDom.firstElementChild as HTMLElement
-      const nodesToVisitStack: [HTMLElement] = [pageNode]
-      const visitedNodeList = []
-
-      while (nodesToVisitStack.length > 0) {
-        const currentNode = nodesToVisitStack.pop()
-        if (
-          currentNode?.nodeType !== 1 ||
-          // Avoiding dynamic elements from being counted as anchor-allowed elements
-          ANCHOR_ELEMENTS_BLOCKED_ATTRIBUTES.some((attrib) =>
-            currentNode.hasAttribute(attrib)
-          )
-        ) {
-          continue
-        }
-        visitedNodeList.push(currentNode)
-        ;[].slice
-          .call(currentNode.childNodes)
-          .reverse()
-          .forEach(function (node) {
-            nodesToVisitStack.push(node)
-          })
-      }
-
-      visitedNodeList.shift()
-      visitedNodeList.forEach((node, index) => {
-        // start from index 1, index 0 reserved for anchor unknown.
-        node.setAttribute('data-omnivore-anchor-idx', (index + 1).toString())
-      })
-
-      article.content = articleDom.documentElement.outerHTML
     }
 
+    visitedNodeList.shift()
+    visitedNodeList.forEach((node, index) => {
+      // start from index 1, index 0 reserved for anchor unknown.
+      node.setAttribute('data-omnivore-anchor-idx', (index + 1).toString())
+    })
+
+    const newHtml = newDocumentElement.outerHTML
     const newWindow = parseHTML('')
     const DOMPurify = createDOMPurify(newWindow)
     DOMPurify.addHook('uponSanitizeElement', domPurifySanitizeHook)
-    const clean = DOMPurify.sanitize(article?.content || '', DOM_PURIFY_CONFIG)
+    const cleanHtml = DOMPurify.sanitize(newHtml, DOM_PURIFY_CONFIG)
+    parsedContent.content = cleanHtml
 
-    Object.assign(article || {}, {
-      content: clean,
-      title: article?.title,
-      previewImage: article?.previewImage,
-      siteName: article?.siteName,
-      siteIcon: article?.siteIcon,
-      byline: article?.byline,
-      language: article?.language,
-    })
     logRecord.parseSuccess = true
   } catch (error) {
-    logger.info('Error parsing content', error)
+    logger.error('Error parsing content', error)
+
     Object.assign(logRecord, {
       parseSuccess: false,
       parseError: error,
     })
   }
 
-  const { title, canonicalUrl } = pageInfo
-
-  Object.assign(article || {}, {
-    title: article?.title || title,
-  })
-
-  logger.info('parse-article completed')
+  logger.info('parse-article completed', logRecord)
 
   return {
-    domContent: document,
-    parsedContent: article,
     canonicalUrl,
-    pageType: dom ? parseOriginalContent(dom) : PageType.Unknown,
+    parsedContent,
+    domContent,
+    pageType,
     highlightData,
   }
 }
@@ -642,10 +647,15 @@ export const contentConverter = (
 ): contentConverterFunc | undefined => {
   switch (format) {
     case ArticleFormat.Markdown:
-      return htmlToMarkdown
+      return (html: string) => {
+        return ''
+      }
+    //      return htmlToMarkdown
     case ArticleFormat.HighlightedMarkdown:
-      return htmlToHighlightedMarkdown
-    case ArticleFormat.Html:
+      return (html: string) => {
+        return ''
+      }
+    //      return htmlToHighlightedMarkdown
     default:
       return undefined
   }
@@ -669,7 +679,7 @@ export const htmlToHighlightedMarkdown = (
       throw new Error('Invalid html content')
     }
   } catch (err) {
-    logger.info(err)
+    logger.error(err)
     return nhm.translate(/* html */ html)
   }
 
@@ -689,7 +699,7 @@ export const htmlToHighlightedMarkdown = (
           articleTextNodes
         )
       } catch (err) {
-        logger.info(err)
+        logger.error(err)
       }
     })
   html = document.documentElement.outerHTML
@@ -699,6 +709,13 @@ export const htmlToHighlightedMarkdown = (
 
 export const htmlToMarkdown = (html: string) => {
   return nhm.translate(/* html */ html)
+}
+
+export const markdownToHtml = (markdown: string) => {
+  const converter = new showdown.Converter({
+    backslashEscapesHTMLTags: true,
+  })
+  return converter.makeHtml(markdown)
 }
 
 export const getDistillerResult = async (
@@ -828,7 +845,7 @@ export const parseFeed = async (
       }
     }
 
-    const parser = new Parser(RSS_PARSER_CONFIG)
+    const parser = new Parser(rssParserConfig())
 
     const feed = content
       ? await parser.parseString(content)
@@ -847,4 +864,22 @@ export const parseFeed = async (
     logger.error('Error parsing feed', error)
     return null
   }
+}
+
+const formatHighlightQuote = (quote: string): string => {
+  // replace all empty lines with blockquote '>' to preserve paragraphs
+  return quote.replace(/^(?=\n)$|^\s*?\n/gm, '> ')
+}
+
+export const highlightToMarkdown = (highlight: Highlight): string => {
+  if (highlight.highlightType === HighlightType.Highlight && highlight.quote) {
+    const quote = formatHighlightQuote(highlight.quote)
+    const labels = highlight.labels?.map((label) => `#${label.name}`).join(' ')
+    const note = highlight.annotation
+    return `> ${quote} ${labels ? `\n\n${labels}` : ''}${
+      note ? `\n\n${note}` : ''
+    }`
+  }
+
+  return ''
 }

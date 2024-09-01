@@ -1,17 +1,21 @@
 import { PubSub } from '@google-cloud/pubsub'
 import express from 'express'
+import { RuleEventType } from './entity/rule'
 import { env } from './env'
 import { ReportType } from './generated/graphql'
-import { deepDelete } from './utils/helpers'
-import { buildLogger } from './utils/logger'
+import {
+  enqueueProcessYouTubeVideo,
+  enqueueThumbnailJob,
+  enqueueTriggerRuleJob,
+} from './utils/createTask'
+import { logger } from './utils/logger'
+import { isYouTubeVideoURL } from './utils/youtube'
 
-const logger = buildLogger('pubsub')
+export type EntityEvent = { id: string }
 
 const client = new PubSub()
 
 export const createPubSubClient = (): PubsubClient => {
-  const fieldsToDelete = ['user'] as const
-
   const publish = (topicName: string, msg: Buffer): Promise<void> => {
     if (env.dev.isLocal) {
       logger.info(`Publishing ${topicName}: ${msg.toString()}`)
@@ -41,45 +45,74 @@ export const createPubSubClient = (): PubsubClient => {
         Buffer.from(JSON.stringify({ userId, email, name, username }))
       )
     },
-    entityCreated: <T>(
+    entityCreated: async <T extends EntityEvent>(
       type: EntityType,
       data: T,
       userId: string
     ): Promise<void> => {
-      const cleanData = deepDelete(
-        data as T & Record<typeof fieldsToDelete[number], unknown>,
-        [...fieldsToDelete]
-      )
+      // queue trigger rule job
+      await enqueueTriggerRuleJob({
+        ruleEventType: `${type.toUpperCase()}_CREATED` as RuleEventType,
+        data,
+        userId,
+      })
 
-      return publish(
-        'entityCreated',
-        Buffer.from(JSON.stringify({ type, userId, ...cleanData }))
-      )
+      if (type === EntityType.ITEM) {
+        // if (await findGrantedFeatureByName(FeatureName.AISummaries, userId)) {
+        // await enqueueAISummarizeJob({
+        //   userId,
+        //   libraryItemId,
+        // })
+        // }
+
+        const isItemWithURL = (data: any): data is { originalUrl: string } => {
+          return 'originalUrl' in data
+        }
+
+        if (isItemWithURL(data) && isYouTubeVideoURL(data['originalUrl'])) {
+          await enqueueProcessYouTubeVideo({
+            userId,
+            libraryItemId: data.id,
+          })
+        }
+
+        const hasThumbnail = (
+          data: any
+        ): data is { thumbnail: string | null } => {
+          return 'thumbnail' in data
+        }
+
+        // we don't want to create thumbnail for imported pages and pages that already have thumbnail
+        if (!hasThumbnail(data) || !data.thumbnail) {
+          try {
+            // create a task to update thumbnail and pre-cache all images
+            const job = await enqueueThumbnailJob(userId, data.id)
+            logger.info('Thumbnail job created', { id: job?.id })
+          } catch (e) {
+            logger.error('Failed to enqueue thumbnail job', e)
+          }
+        }
+      }
     },
-    entityUpdated: <T>(
+    entityUpdated: async <T extends EntityEvent>(
       type: EntityType,
       data: T,
       userId: string
     ): Promise<void> => {
-      const cleanData = deepDelete(
-        data as T & Record<typeof fieldsToDelete[number], unknown>,
-        [...fieldsToDelete]
-      )
-
-      return publish(
-        'entityUpdated',
-        Buffer.from(JSON.stringify({ type, userId, ...cleanData }))
-      )
+      // queue trigger rule job
+      await enqueueTriggerRuleJob({
+        userId,
+        ruleEventType: `${type.toUpperCase()}_UPDATED` as RuleEventType,
+        data,
+      })
     },
-    entityDeleted: (
+    entityDeleted: async (
       type: EntityType,
       id: string,
       userId: string
     ): Promise<void> => {
-      return publish(
-        'entityDeleted',
-        Buffer.from(JSON.stringify({ type, id, userId }))
-      )
+      logger.info(`entityDeleted: ${type} ${id} ${userId}`)
+      await Promise.resolve()
     },
     reportSubmitted: (
       submitterId: string,
@@ -98,9 +131,10 @@ export const createPubSubClient = (): PubsubClient => {
 }
 
 export enum EntityType {
-  PAGE = 'page',
-  HIGHLIGHT = 'highlight',
-  LABEL = 'label',
+  ITEM = 'PAGE',
+  HIGHLIGHT = 'HIGHLIGHT',
+  LABEL = 'LABEL',
+  RSS_FEED = 'FEED',
 }
 
 export interface PubsubClient {
@@ -110,8 +144,16 @@ export interface PubsubClient {
     name: string,
     username: string
   ) => Promise<void>
-  entityCreated: <T>(type: EntityType, data: T, userId: string) => Promise<void>
-  entityUpdated: <T>(type: EntityType, data: T, userId: string) => Promise<void>
+  entityCreated: <T extends EntityEvent>(
+    type: EntityType,
+    data: T,
+    userId: string
+  ) => Promise<void>
+  entityUpdated: <T extends EntityEvent>(
+    type: EntityType,
+    data: T,
+    userId: string
+  ) => Promise<void>
   entityDeleted: (type: EntityType, id: string, userId: string) => Promise<void>
   reportSubmitted(
     submitterId: string | undefined,

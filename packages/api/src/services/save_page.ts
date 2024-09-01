@@ -1,8 +1,11 @@
 import { Readability } from '@omnivore/readability'
 import { DeepPartial } from 'typeorm'
-import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity'
 import { Highlight } from '../entity/highlight'
-import { LibraryItem, LibraryItemState } from '../entity/library_item'
+import {
+  DirectionalityType,
+  LibraryItem,
+  LibraryItemState,
+} from '../entity/library_item'
 import { User } from '../entity/user'
 import { homePageURL } from '../env'
 import {
@@ -12,13 +15,11 @@ import {
   SavePageInput,
   SaveResult,
 } from '../generated/graphql'
-import { authTrx } from '../repository'
-import { enqueueThumbnailTask } from '../utils/createTask'
+import { Merge } from '../util'
 import {
   cleanUrl,
   generateSlug,
   stringToHash,
-  TWEET_URL_REGEX,
   validatedDate,
   wordsCount,
 } from '../utils/helpers'
@@ -27,12 +28,12 @@ import { parsePreparedContent } from '../utils/parser'
 import { contentReaderForLibraryItem } from '../utils/uploads'
 import { createPageSaveRequest } from './create_page_save_request'
 import { createHighlight } from './highlights'
-import { createAndSaveLabelsInLibraryItem } from './labels'
-import { createLibraryItem, updateLibraryItem } from './library_item'
+import { createAndAddLabelsToLibraryItem } from './labels'
+import { createOrUpdateLibraryItem } from './library_item'
 
 // where we can use APIs to fetch their underlying content.
 const FORCE_PUPPETEER_URLS = [
-  TWEET_URL_REGEX,
+  /twitter\.com\/(?:#!\/)?(\w+)\/status(?:es)?\/(\d+)(?:\/.*)?/,
   /^((?:https?:)?\/\/)?((?:www|m)\.)?((?:youtube\.com|youtu.be))(\/(?:[\w-]+\?v=|embed\/|v\/)?)([\w-]+)(\S+)?$/,
 ]
 const ALREADY_PARSED_SOURCES = [
@@ -58,28 +59,64 @@ const createSlug = (url: string, title?: string | null | undefined) => {
 const shouldParseInBackend = (input: SavePageInput): boolean => {
   return (
     ALREADY_PARSED_SOURCES.indexOf(input.source) === -1 &&
-    FORCE_PUPPETEER_URLS.some((regex) => regex.test(input.url))
+    FORCE_PUPPETEER_URLS.some((regex) => {
+      return regex.test(input.url)
+    })
   )
 }
 
+export type SavePageArgs = Merge<
+  SavePageInput,
+  {
+    feedContent?: string
+    previewImage?: string
+    author?: string
+  }
+>
+
 export const savePage = async (
-  input: SavePageInput,
+  input: SavePageArgs,
   user: User
 ): Promise<SaveResult> => {
-  const parseResult = await parsePreparedContent(
-    input.url,
-    {
-      document: input.originalContent,
-      pageInfo: {
-        title: input.title,
-        canonicalUrl: input.url,
-      },
-    },
-    input.parseResult
-  )
-  const [newSlug, croppedPathname] = createSlug(input.url, input.title)
-  let slug = newSlug
+  const [slug, croppedPathname] = createSlug(input.url, input.title)
   let clientRequestId = input.clientRequestId
+
+  // always parse in backend if the url is in the force puppeteer list
+  if (shouldParseInBackend(input)) {
+    try {
+      await createPageSaveRequest({
+        user,
+        url: input.url,
+        articleSavingRequestId: clientRequestId || undefined,
+        state: input.state || undefined,
+        labels: input.labels || undefined,
+        folder: input.folder || undefined,
+      })
+    } catch (e) {
+      return {
+        __typename: 'SaveError',
+        errorCodes: [SaveErrorCode.Unknown],
+        message: 'Failed to create page save request',
+      }
+    }
+
+    return {
+      clientRequestId,
+      url: `${homePageURL()}/${user.profile.username}/${slug}`,
+    }
+  }
+
+  const preparedDocument: PreparedDocumentInput = {
+    document: input.originalContent,
+    pageInfo: {
+      title: input.title,
+      canonicalUrl: input.url,
+      previewImage: input.previewImage,
+      author: input.author,
+    },
+  }
+
+  const parseResult = await parsePreparedContent(input.url, preparedDocument)
 
   const itemToSave = parsedContentToLibraryItem({
     itemId: clientRequestId,
@@ -97,86 +134,31 @@ export const savePage = async (
     state: input.state || undefined,
     rssFeedUrl: input.rssFeedUrl,
     folder: input.folder,
+    feedContent: input.feedContent,
+    dir: parseResult.parsedContent?.dir,
+    preparedDocument,
+    labelNames: input.labels?.map((label) => label.name),
+    highlightAnnotations: parseResult.highlightData ? [''] : undefined,
   })
   const isImported =
     input.source === 'csv-importer' || input.source === 'pocket'
 
-  // always parse in backend if the url is in the force puppeteer list
-  if (shouldParseInBackend(input)) {
-    try {
-      await createPageSaveRequest({
-        userId: user.id,
-        url: itemToSave.originalUrl,
-        articleSavingRequestId: clientRequestId || undefined,
-        state: input.state || undefined,
-        labels: input.labels || undefined,
-        folder: input.folder || undefined,
-      })
-    } catch (e) {
-      return {
-        errorCodes: [SaveErrorCode.Unknown],
-        message: 'Failed to create page save request',
-      }
-    }
-  } else {
-    // check if the item already exists
-    const existingLibraryItem = await authTrx((t) =>
-      t.getRepository(LibraryItem).findOneBy({
-        user: { id: user.id },
-        originalUrl: itemToSave.originalUrl,
-      })
-    )
-    if (existingLibraryItem) {
-      clientRequestId = existingLibraryItem.id
-      slug = existingLibraryItem.slug
+  // do not publish a pubsub event if the item is imported
+  const newItem = await createOrUpdateLibraryItem(
+    itemToSave,
+    user.id,
+    undefined,
+    isImported
+  )
+  clientRequestId = newItem.id
 
-      // we don't want to update an rss feed item if rss-feeder is tring to re-save it
-      if (existingLibraryItem.subscription === input.rssFeedUrl) {
-        return {
-          clientRequestId,
-          url: `${homePageURL()}/${user.profile.username}/${slug}`,
-        }
-      }
-
-      // update the item except for id and slug
-      await updateLibraryItem(
-        clientRequestId,
-        {
-          ...itemToSave,
-          id: undefined,
-          slug: undefined,
-        } as QueryDeepPartialEntity<LibraryItem>,
-        user.id
-      )
-    } else {
-      // do not publish a pubsub event if the item is imported
-      const newItem = await createLibraryItem(
-        itemToSave,
-        user.id,
-        undefined,
-        isImported
-      )
-      clientRequestId = newItem.id
-    }
-
-    await createAndSaveLabelsInLibraryItem(
-      clientRequestId,
-      user.id,
-      input.labels,
-      input.rssFeedUrl
-    )
-  }
-
-  // we don't want to create thumbnail for imported pages and pages that already have thumbnail
-  if (!isImported && !parseResult.parsedContent?.previewImage) {
-    try {
-      // create a task to update thumbnail and pre-cache all images
-      const taskId = await enqueueThumbnailTask(user.id, slug)
-      logger.info('Created thumbnail task', { taskId })
-    } catch (e) {
-      logger.error('Failed to create thumbnail task', e)
-    }
-  }
+  // merge labels
+  await createAndAddLabelsToLibraryItem(
+    clientRequestId,
+    user.id,
+    input.labels,
+    input.rssFeedUrl
+  )
 
   if (parseResult.highlightData) {
     const highlight: DeepPartial<Highlight> = {
@@ -185,11 +167,21 @@ export const savePage = async (
       libraryItem: { id: clientRequestId },
     }
 
-    if (!(await createHighlight(highlight, clientRequestId, user.id))) {
-      return {
-        errorCodes: [SaveErrorCode.EmbeddedHighlightFailed],
-        message: 'Failed to save highlight',
-      }
+    // merge highlights
+    try {
+      await createHighlight(
+        highlight,
+        clientRequestId,
+        user.id,
+        undefined,
+        false
+      )
+    } catch (error) {
+      logger.error('Failed to create highlight', {
+        highlight,
+        clientRequestId,
+        userId: user.id,
+      })
     }
   }
 
@@ -203,7 +195,6 @@ export const savePage = async (
 export const parsedContentToLibraryItem = ({
   url,
   userId,
-  originalHtml,
   itemId,
   parsedContent,
   slug,
@@ -219,6 +210,10 @@ export const parsedContentToLibraryItem = ({
   state,
   rssFeedUrl,
   folder,
+  feedContent,
+  dir,
+  labelNames,
+  highlightAnnotations,
 }: {
   url: string
   userId: string
@@ -238,15 +233,19 @@ export const parsedContentToLibraryItem = ({
   state?: ArticleSavingRequestStatus | null
   rssFeedUrl?: string | null
   folder?: string | null
+  feedContent?: string | null
+  dir?: string | null
+  labelNames?: string[]
+  highlightAnnotations?: string[]
 }): DeepPartial<LibraryItem> & { originalUrl: string } => {
-  console.log('save_page: state', { url, state, itemId })
+  logger.info('save_page', { url, state, itemId })
   return {
     id: itemId || undefined,
     slug,
     user: { id: userId },
-    originalContent: originalHtml,
     readableContent: parsedContent?.content || '',
     description: parsedContent?.excerpt,
+    previewContent: parsedContent?.excerpt,
     title:
       title ||
       parsedContent?.title ||
@@ -254,12 +253,15 @@ export const parsedContentToLibraryItem = ({
       croppedPathname ||
       parsedContent?.siteName ||
       url,
-    author: parsedContent?.byline,
+    author: preparedDocument?.pageInfo.author || parsedContent?.byline,
     originalUrl: cleanUrl(canonicalUrl || url),
     itemType,
     textContentHash:
       uploadFileHash || stringToHash(parsedContent?.content || url),
-    thumbnail: parsedContent?.previewImage ?? undefined,
+    thumbnail:
+      (preparedDocument?.pageInfo.previewImage ||
+        parsedContent?.previewImage) ??
+      undefined,
     publishedAt: validatedDate(
       publishedAt || parsedContent?.publishedDate || undefined
     ),
@@ -269,15 +271,25 @@ export const parsedContentToLibraryItem = ({
     state: state
       ? (state as unknown as LibraryItemState)
       : LibraryItemState.Succeeded,
-    savedAt: validatedDate(savedAt),
+    savedAt: validatedDate(savedAt) || new Date(),
     siteName: parsedContent?.siteName,
     itemLanguage: parsedContent?.language,
     siteIcon: parsedContent?.siteIcon,
-    wordCount: wordsCount(parsedContent?.textContent || ''),
+    wordCount: parsedContent?.textContent
+      ? wordsCount(parsedContent.textContent)
+      : wordsCount(parsedContent?.content || '', true),
     contentReader: contentReaderForLibraryItem(itemType, uploadFileId),
     subscription: rssFeedUrl,
     folder: folder || 'inbox',
     archivedAt:
       state === ArticleSavingRequestStatus.Archived ? new Date() : null,
+    deletedAt: state === ArticleSavingRequestStatus.Deleted ? new Date() : null,
+    feedContent,
+    directionality:
+      dir?.toLowerCase() === 'rtl'
+        ? DirectionalityType.RTL
+        : DirectionalityType.LTR, // default to LTR
+    labelNames,
+    highlightAnnotations,
   }
 }

@@ -6,7 +6,10 @@ import {
 } from '../../generated/graphql'
 import {
   getFeatureName,
+  getFeaturesCache,
+  isOptInFeatureErrorCode,
   optInFeature,
+  setFeaturesCache,
   signFeatureToken,
 } from '../../services/features'
 import { authorized } from '../../utils/gql-utils'
@@ -33,15 +36,20 @@ export const optInFeatureResolver = authorized<
       }
     }
 
-    const optedInFeature = await optInFeature(featureName, claims.uid)
-    if (!optedInFeature) {
+    const userId = claims.uid
+    const optedInFeature = await optInFeature(featureName, userId)
+    if (isOptInFeatureErrorCode(optedInFeature)) {
       return {
-        errorCodes: [OptInFeatureErrorCode.NotFound],
+        errorCodes: [optedInFeature],
       }
     }
     log.info('Opted in to a feature', optedInFeature)
 
-    const token = signFeatureToken(optedInFeature, claims.uid)
+    const cachedFeatures = (await getFeaturesCache(userId)) || []
+    const updatedFeatures = [...cachedFeatures, optedInFeature]
+    await setFeaturesCache(userId, updatedFeatures)
+
+    const token = signFeatureToken(optedInFeature, userId)
 
     return {
       feature: {

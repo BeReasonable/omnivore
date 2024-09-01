@@ -16,7 +16,11 @@ import {
 import { getRepository } from '../../repository'
 import { findApiKeys } from '../../services/api_key'
 import { analytics } from '../../utils/analytics'
-import { generateApiKey, hashApiKey } from '../../utils/auth'
+import {
+  deleteCachedClaims,
+  generateApiKey,
+  hashApiKey,
+} from '../../utils/auth'
 import { authorized } from '../../utils/gql-utils'
 
 export const apiKeysResolver = authorized<ApiKeysSuccess, ApiKeysError>(
@@ -52,8 +56,8 @@ export const generateApiKeyResolver = authorized<
       expiresAt: exp,
     })
 
-    analytics.track({
-      userId: uid,
+    analytics.capture({
+      distinctId: uid,
       event: 'api_key_generated',
       properties: {
         name,
@@ -92,8 +96,10 @@ export const revokeApiKeyResolver = authorized<
 
     const deletedApiKey = await apiRepo.remove(apiKey)
 
-    analytics.track({
-      userId: uid,
+    await deleteCachedClaims(deletedApiKey.key)
+
+    analytics.capture({
+      distinctId: uid,
       event: 'api_key_revoked',
       properties: {
         id,

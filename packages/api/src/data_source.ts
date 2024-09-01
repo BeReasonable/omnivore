@@ -16,6 +16,31 @@ export const appDataSource = new DataSource({
   subscribers: [__dirname + '/events/**/*{.js,.ts}'],
   namingStrategy: new SnakeNamingStrategy(),
   logger: new CustomTypeOrmLogger(['query', 'info']),
-  connectTimeoutMS: 40000, // 40 seconds
+  connectTimeoutMS: 10000, // 10 seconds
   maxQueryExecutionTime: 10000, // 10 seconds
+  extra: {
+    options: process.env.PG_EXTRA_OPTIONS,
+    max: env.pg.pool.max,
+    idleTimeoutMillis: 10000, // 10 seconds
+  },
+  replication: env.pg.replication
+    ? {
+        master: {
+          host: env.pg.host,
+          port: env.pg.port,
+          username: env.pg.userName,
+          password: env.pg.password,
+          database: env.pg.dbName,
+        },
+        slaves: [
+          {
+            host: env.pg.replica.host,
+            port: env.pg.replica.port,
+            username: env.pg.replica.userName,
+            password: env.pg.replica.password,
+            database: env.pg.replica.dbName,
+          },
+        ],
+      }
+    : undefined,
 })

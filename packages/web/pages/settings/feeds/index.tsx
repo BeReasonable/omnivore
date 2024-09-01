@@ -1,8 +1,12 @@
+import { FloppyDisk, Pencil, XCircle } from '@phosphor-icons/react'
 import { useRouter } from 'next/router'
-import { FloppyDisk, Pencil, XCircle } from 'phosphor-react'
 import { useMemo, useState } from 'react'
 import { FormInput } from '../../../components/elements/FormElements'
-import { HStack, SpanBox } from '../../../components/elements/LayoutPrimitives'
+import {
+  HStack,
+  SpanBox,
+  VStack,
+} from '../../../components/elements/LayoutPrimitives'
 import { ConfirmationModal } from '../../../components/patterns/ConfirmationModal'
 import {
   EmptySettingsRow,
@@ -17,6 +21,8 @@ import {
   updateSubscriptionMutation,
 } from '../../../lib/networking/mutations/updateSubscriptionMutation'
 import {
+  FetchContentType,
+  Subscription,
   SubscriptionStatus,
   SubscriptionType,
   useGetSubscriptionsQuery,
@@ -27,9 +33,13 @@ import { formatMessage } from '../../../locales/en/messages'
 
 export default function Rss(): JSX.Element {
   const router = useRouter()
-  const { subscriptions, revalidate, isValidating } = useGetSubscriptionsQuery(
+  const subscriptionsResponse = useGetSubscriptionsQuery(
     SubscriptionType.RSS
   )
+  const subscriptions = subscriptionsResponse.subscriptions as Array<
+    Subscription & { type: SubscriptionType.RSS }
+  >
+  const { isValidating, revalidate } = subscriptionsResponse
   const [onDeleteId, setOnDeleteId] = useState<string>('')
   const [onEditId, setOnEditId] = useState('')
   const [onEditName, setOnEditName] = useState('')
@@ -95,7 +105,24 @@ export default function Rss(): JSX.Element {
     revalidate()
   }
 
-  applyStoredTheme(false)
+  const updateFetchContent = async (
+    id: string,
+    fetchContent: FetchContentType
+  ): Promise<void> => {
+    const result = await updateSubscriptionMutation({
+      id,
+      fetchContentType: fetchContent,
+    })
+
+    if (result) {
+      showSuccessToast(`Updated feed fetch rule`)
+    } else {
+      showErrorToast(`Error updating feed fetch rule`)
+    }
+    revalidate()
+  }
+
+  applyStoredTheme()
 
   return (
     <SettingsTable
@@ -105,17 +132,6 @@ export default function Rss(): JSX.Element {
       createTitle="Add a feed"
       createAction={() => {
         router.push('/settings/feeds/add')
-      }}
-      suggestionInfo={{
-        title: 'Add RSS and Atom feeds to your Omnivore account',
-        message:
-          'When you add a new feed the last 24hrs of items, or at least one item will be added to your account. Feeds will be checked for updates every hour, and new items will be added to your Following. You can also add feeds to your Library by checking the box below.',
-        docs: 'https://docs.omnivore.app/using/feeds.html',
-        key: '--settings-feeds-show-help',
-        CTAText: 'Add a feed',
-        onClickCTA: () => {
-          router.push('/settings/feeds/add')
-        },
       }}
     >
       {sortedSubscriptions.length === 0 ? (
@@ -200,22 +216,66 @@ export default function Rss(): JSX.Element {
               }}
               deleteTitle="Unsubscribe"
               sublineElement={
-                <SpanBox
+                <VStack
                   css={{
                     my: '8px',
                     fontSize: '11px',
                   }}
                 >
-                  {`URL: ${subscription.url}, `}
-                  {`Last fetched: ${
-                    subscription.lastFetchedAt
-                      ? formattedDateTime(subscription.lastFetchedAt)
-                      : 'Never'
-                  }`}
-                </SpanBox>
+                  <SpanBox>{`URL: ${subscription.url}`}</SpanBox>
+                  {/* show failed timestamp instead of last refreshed timestamp if the feed failed to refresh */}
+                  {subscription.failedAt ? (
+                    <SpanBox
+                      css={{ color: 'red' }}
+                    >{`Failed to refresh: ${formattedDateTime(
+                      subscription.failedAt
+                    )}`}</SpanBox>
+                  ) : (
+                    <SpanBox>{`Last refreshed: ${
+                      subscription.lastFetchedAt
+                        ? formattedDateTime(subscription.lastFetchedAt)
+                        : 'Never'
+                    }`}</SpanBox>
+                  )}
+                  <SpanBox>
+                    {subscription.mostRecentItemDate &&
+                      `Most recent item: ${formattedDateTime(
+                        subscription.mostRecentItemDate
+                      )}`}
+                  </SpanBox>
+                  <select
+                    tabIndex={-1}
+                    onChange={(event) => {
+                      ;(async () => {
+                        updateFetchContent(
+                          subscription.id,
+                          event.target.value as FetchContentType
+                        )
+                      })()
+                    }}
+                    defaultValue={subscription.fetchContentType}
+                    style={{
+                      padding: '5px',
+                      marginTop: '5px',
+                      borderRadius: '6px',
+                      minWidth: '196px',
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                    }}
+                  >
+                    <option value="ALWAYS">Fetch link: Always</option>
+                    <option value="NEVER">Fetch link: Never</option>
+                    <option value="WHEN_EMPTY">Fetch link: When empty</option>
+                  </select>
+                </VStack>
               }
               onClick={() => {
-                router.push(`/home?q=in:inbox rss:"${subscription.url}"`)
+                router.push(
+                  `/search?q=in:inbox rss:"${encodeURIComponent(
+                    subscription.url
+                  )}"`
+                )
               }}
               // extraElement={
               //   <HStack

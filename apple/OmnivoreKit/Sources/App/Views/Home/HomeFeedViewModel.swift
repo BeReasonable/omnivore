@@ -28,10 +28,9 @@ enum LoadingBarStyle {
   @Published var linkIsActive = false
 
   @Published var showLabelsSheet = false
-  @Published var showSnackbar = false
+
   @Published var showAddFeedView = false
   @Published var showHideFollowingAlert = false
-  @Published var snackbarOperation: SnackbarOperation?
 
   @Published var filters = [InternalFilter]()
 
@@ -39,6 +38,8 @@ enum LoadingBarStyle {
   @Published var selectedLabels = [LinkedItemLabel]()
   @Published var negatedLabels = [LinkedItemLabel]()
   @Published var appliedSort = LinkedItemSort.newest.rawValue
+
+  @Published var digestIsUnread = false
 
   @State var lastMoreFetched: Date?
   @State var lastFiltersFetched: Date?
@@ -48,8 +49,11 @@ enum LoadingBarStyle {
   @AppStorage(UserDefaultKey.hideFeatureSection.rawValue) var hideFeatureSection = false
   @AppStorage(UserDefaultKey.stopUsingFollowingPrimer.rawValue) var stopUsingFollowingPrimer = false
   @AppStorage("LibraryTabView::hideFollowingTab") var hideFollowingTab = false
+  @AppStorage("LibraryTabView::hideDigestIcon") var hideDigestIcon = false
+  @AppStorage(UserDefaultKey.lastVisitedDigestId.rawValue) var lastVisitedDigestId = ""
 
-  @AppStorage(UserDefaultKey.lastSelectedFeaturedItemFilter.rawValue) var featureFilter = FeaturedItemFilter.continueReading.rawValue
+  @AppStorage(UserDefaultKey.lastSelectedFeaturedItemFilter.rawValue) var featureFilter = 
+  FeaturedItemFilter.continueReading.rawValue
 
   @Published var appliedFilter: InternalFilter? {
     didSet {
@@ -66,6 +70,18 @@ enum LoadingBarStyle {
     self.folderConfigs = folderConfigs
 
     super.init()
+  }
+
+  func presentItem(item: Models.LibraryItem) {
+    withAnimation {
+      self.selectedItem = item
+      self.linkIsActive = true
+    }
+  }
+
+  func pushLinkedRequest(request: LinkRequest) {
+    self.linkRequest = request
+    self.presentWebContainer = true
   }
 
   private var filterState: FetcherFilterState? {
@@ -203,7 +219,7 @@ enum LoadingBarStyle {
 
   func loadItems(dataService: DataService, isRefresh: Bool, forceRemote: Bool = false, loadingBarStyle: LoadingBarStyle? = nil) async {
     isLoading = true
-    showLoadingBar = isRefresh ? loadingBarStyle ?? .redacted : .none
+    showLoadingBar = .simple // isRefresh ? loadingBarStyle ?? .redacted : .none
 
     if let filterState = filterState {
       await fetcher.loadItems(
@@ -235,13 +251,11 @@ enum LoadingBarStyle {
   }
 
   func snackbar(_ message: String, undoAction: SnackbarUndoAction? = nil) {
-    snackbarOperation = SnackbarOperation(message: message, undoAction: undoAction)
-    showSnackbar = true
+    Snackbar.show(message: message, undoAction: undoAction, dismissAfter: 2000)
   }
 
   func setLinkArchived(dataService: DataService, objectID: NSManagedObjectID, archived: Bool) {
-    dataService.archiveLink(objectID: objectID, archived: archived)
-    snackbar(archived ? "Link archived" : "Link unarchived")
+    archiveLibraryItemAction(dataService: dataService, objectID: objectID, archived: archived)
   }
 
   func removeLibraryItem(dataService: DataService, objectID: NSManagedObjectID) {
@@ -309,7 +323,7 @@ enum LoadingBarStyle {
     Task {
       do {
         try await dataService.moveItem(itemID: item.unwrappedID, folder: folder)
-        snackbar("Item moved")
+        snackbar("Moved to library")
       } catch {
         snackbar("Error moving item to \(folder)")
       }
@@ -370,6 +384,31 @@ enum LoadingBarStyle {
     if let filter = filter {
       featureFilter = filter.rawValue
       fetcher.updateFeatureFilter(context: context, filter: filter)
+    }
+  }
+
+  @Published var isEmptyingTrash = false
+
+  func emptyTrash(dataService: DataService) {
+    self.isEmptyingTrash = true
+    Task {
+      if !(await dataService.emptyTrash()) {
+        snackbar("Error emptying trash")
+      } else {
+        snackbar("Trash emptied")
+      }
+      isEmptyingTrash = false
+    }
+  }
+
+  func checkForDigestUpdate(dataService: DataService) async {
+    do {
+      if dataService.featureFlags.digestEnabled, 
+          let result = try? await dataService.getLatestDigest(timeoutInterval: 2) {
+        if result.id != lastVisitedDigestId {
+          digestIsUnread = true
+        }
+      }
     }
   }
 }

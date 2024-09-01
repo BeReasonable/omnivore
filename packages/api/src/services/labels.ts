@@ -2,58 +2,115 @@ import { DeepPartial, FindOptionsWhere, In } from 'typeorm'
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity'
 import { EntityLabel, LabelSource } from '../entity/entity_label'
 import { Label } from '../entity/label'
-import { createPubSubClient, EntityType, PubsubClient } from '../pubsub'
+import {
+  createPubSubClient,
+  EntityEvent,
+  EntityType,
+  PubsubClient,
+} from '../pubsub'
 import { authTrx } from '../repository'
 import { CreateLabelInput, labelRepository } from '../repository/label'
-import { libraryItemRepository } from '../repository/library_item'
+import { Merge } from '../util'
+import { bulkEnqueueUpdateLabels } from '../utils/createTask'
+import { deepDelete } from '../utils/helpers'
+import { findLibraryItemIdsByLabelId, ItemEvent } from './library_item'
 
-type AddLabelsToLibraryItemEvent = {
-  pageId: string
-  labels: DeepPartial<Label>[]
-  source?: LabelSource
+const columnsToDelete = ['description', 'createdAt'] as const
+type ColumnsToDeleteType = typeof columnsToDelete[number]
+export type LabelEvent = Merge<
+  Omit<DeepPartial<Label>, ColumnsToDeleteType>,
+  EntityEvent
+>
+
+export const batchGetLabelsFromLibraryItemIds = async (
+  libraryItemIds: readonly string[]
+): Promise<Label[][]> => {
+  const labels = await authTrx(
+    async (tx) =>
+      tx.getRepository(EntityLabel).find({
+        where: { libraryItemId: In(libraryItemIds as string[]) },
+        relations: ['label'],
+      }),
+    {
+      replicationMode: 'replica',
+    }
+  )
+
+  return libraryItemIds.map((libraryItemId) =>
+    labels
+      .filter((label) => label.libraryItemId === libraryItemId)
+      .map((label) => label.label)
+  )
 }
-type AddLabelsToHighlightEvent = {
-  highlightId: string
-  labels: DeepPartial<Label>[]
+
+export const batchGetLabelsFromHighlightIds = async (
+  highlightIds: readonly string[]
+): Promise<Label[][]> => {
+  const labels = await authTrx(
+    async (tx) =>
+      tx.getRepository(EntityLabel).find({
+        where: { highlightId: In(highlightIds as string[]) },
+        relations: ['label'],
+      }),
+    {
+      replicationMode: 'replica',
+    }
+  )
+
+  return highlightIds.map((highlightId) =>
+    labels
+      .filter((label) => label.highlightId === highlightId)
+      .map((label) => label.label)
+  )
 }
-
-// const batchGetLabelsFromLinkIds = async (
-//   linkIds: readonly string[]
-// ): Promise<Label[][]> => {
-//   const links = await getRepository(Link).find({
-//     where: { id: In(linkIds as string[]) },
-//     relations: ['labels'],
-//   })
-
-//   return linkIds.map(
-//     (linkId) => links.find((link) => link.id === linkId)?.labels || []
-//   )
-// }
-
-// export const labelsLoader = new DataLoader(batchGetLabelsFromLinkIds)
 
 export const findOrCreateLabels = async (
   labels: CreateLabelInput[],
   userId: string
 ): Promise<Label[]> => {
-  // create labels if not exist
-  await authTrx(
-    async (tx) =>
-      tx.withRepository(labelRepository).createLabels(labels, userId),
-    undefined,
-    userId
-  )
-
-  // find labels
   return authTrx(
-    async (tx) =>
-      tx.withRepository(labelRepository).findByNames(
-        labels.map((l) => l.name),
-        userId
-      ),
-    undefined,
-    userId
+    async (tx) => {
+      const repo = tx.withRepository(labelRepository)
+      // create labels if not exist
+      await repo.createLabels(labels, userId)
+
+      // find labels by names
+      return repo.findBy({
+        name: In(labels.map((l) => l.name)),
+        user: { id: userId },
+      })
+    },
+    {
+      uid: userId,
+    }
   )
+}
+
+export const createAndAddLabelsToLibraryItem = async (
+  libraryItemId: string,
+  userId: string,
+  labels?: CreateLabelInput[] | null,
+  rssFeedUrl?: string | null,
+  source?: LabelSource
+) => {
+  if (rssFeedUrl) {
+    // add rss label to labels
+    labels = (labels || []).concat({ name: 'RSS' })
+    source = 'system'
+  }
+
+  // save labels in item
+  if (labels && labels.length > 0) {
+    const newLabels = await findOrCreateLabels(labels, userId)
+
+    await addLabelsToLibraryItem(
+      newLabels.map((l) => l.id),
+      libraryItemId,
+      userId,
+      source,
+      false
+    )
+  }
 }
 
 export const createAndSaveLabelsInLibraryItem = async (
@@ -109,65 +166,75 @@ export const saveLabelsInLibraryItem = async (
         }))
       )
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 
   if (source === 'user') {
     // create pubsub event
-    await pubsub.entityCreated<AddLabelsToLibraryItemEvent>(
+    await pubsub.entityCreated<ItemEvent>(
       EntityType.LABEL,
-      { pageId: libraryItemId, labels, source },
+      {
+        id: libraryItemId,
+        labels: labels.map((l) => deepDelete(l, columnsToDelete)),
+        labelNames: labels.map((l) => l.name),
+      },
       userId
     )
   }
+
+  // update labels in library item
+  return bulkEnqueueUpdateLabels([{ libraryItemId, userId }])
 }
 
 export const addLabelsToLibraryItem = async (
-  labels: Label[],
+  labelIds: string[],
   libraryItemId: string,
   userId: string,
   source: LabelSource = 'user',
-  pubsub = createPubSubClient()
+  updateLibraryItem = true
 ) => {
   await authTrx(
     async (tx) => {
-      const libraryItem = await tx
-        .withRepository(libraryItemRepository)
-        .findOneByOrFail({ id: libraryItemId, user: { id: userId } })
-
-      if (libraryItem.labels) {
-        labels.push(...libraryItem.labels)
-      }
-
-      // save new labels
-      await tx.getRepository(EntityLabel).save(
-        labels.map((l) => ({
-          labelId: l.id,
-          libraryItemId,
-          source,
-        }))
+      // assign new labels if not exist to the item owner by user
+      await tx.query(
+        `INSERT INTO omnivore.entity_labels (label_id, library_item_id, source)
+          SELECT 
+              lbl.id, 
+              $1, 
+              $2 
+          FROM 
+              omnivore.labels lbl
+          LEFT JOIN 
+              omnivore.entity_labels el 
+          ON 
+              el.label_id = lbl.id 
+              AND el.library_item_id = $1
+          INNER JOIN 
+              omnivore.library_item li 
+          ON 
+              li.id = $1
+          WHERE 
+              lbl.id = ANY($3)
+              AND el.label_id IS NULL;`,
+        [libraryItemId, source, labelIds]
       )
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 
-  if (source === 'user') {
-    // create pubsub event
-    await pubsub.entityCreated<AddLabelsToLibraryItemEvent>(
-      EntityType.LABEL,
-      { pageId: libraryItemId, labels, source },
-      userId
-    )
+  if (updateLibraryItem) {
+    // update labels in library item
+    await bulkEnqueueUpdateLabels([{ libraryItemId, userId }])
   }
 }
 
 export const saveLabelsInHighlight = async (
   labels: Label[],
-  highlightId: string,
-  userId: string,
-  pubsub = createPubSubClient()
+  highlightId: string
 ) => {
   await authTrx(async (tx) => {
     const repo = tx.getRepository(EntityLabel)
@@ -185,13 +252,6 @@ export const saveLabelsInHighlight = async (
       }))
     )
   })
-
-  // create pubsub event
-  await pubsub.entityCreated<AddLabelsToHighlightEvent>(
-    EntityType.LABEL,
-    { highlightId, labels },
-    userId
-  )
 }
 
 export const findLabelsByIds = async (
@@ -205,8 +265,10 @@ export const findLabelsByIds = async (
         user: { id: userId },
       })
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -218,8 +280,9 @@ export const createLabel = async (
   return authTrx(
     (t) =>
       t.withRepository(labelRepository).createLabel({ name, color }, userId),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -229,9 +292,45 @@ export const deleteLabels = async (
 ) => {
   return authTrx(
     async (t) => t.withRepository(labelRepository).delete(criteria),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
+}
+
+export const deleteLabelsByLibraryItemId = async (
+  userId: string,
+  libraryItemId: string
+) => {
+  return authTrx(
+    async (t) =>
+      t.getRepository(EntityLabel).delete({
+        libraryItemId,
+      }),
+    {
+      uid: userId,
+    }
+  )
+}
+
+export const deleteLabelById = async (labelId: string, userId: string) => {
+  const libraryItemIds = await findLibraryItemIdsByLabelId(labelId, userId)
+
+  const deleteResult = await authTrx(async (tx) => {
+    return tx.withRepository(labelRepository).deleteById(labelId)
+  })
+
+  if (!deleteResult.affected) {
+    return false
+  }
+
+  const data = libraryItemIds.map((libraryItemId) => ({
+    libraryItemId,
+    userId,
+  }))
+  await bulkEnqueueUpdateLabels(data)
+
+  return true
 }
 
 export const updateLabel = async (
@@ -239,16 +338,27 @@ export const updateLabel = async (
   label: QueryDeepPartialEntity<Label>,
   userId: string
 ) => {
-  return authTrx(
+  const updatedLabel = await authTrx(
     async (t) => {
       const repo = t.withRepository(labelRepository)
       await repo.updateLabel(id, label)
 
       return repo.findOneByOrFail({ id })
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
+
+  const libraryItemIds = await findLibraryItemIdsByLabelId(id, userId)
+
+  const data = libraryItemIds.map((libraryItemId) => ({
+    libraryItemId,
+    userId,
+  }))
+  await bulkEnqueueUpdateLabels(data)
+
+  return updatedLabel
 }
 
 export const findLabelsByUserId = async (userId: string): Promise<Label[]> => {
@@ -258,8 +368,10 @@ export const findLabelsByUserId = async (userId: string): Promise<Label[]> => {
         where: { user: { id: userId } },
         order: { position: 'ASC' },
       }),
-    undefined,
-    userId
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -269,8 +381,10 @@ export const findLabelById = async (id: string, userId: string) => {
       tx
         .withRepository(labelRepository)
         .findOneBy({ id, user: { id: userId } }),
-    undefined,
-    userId
+    {
+      uid: userId,
+      replicationMode: 'replica',
+    }
   )
 }
 
@@ -290,7 +404,8 @@ export const findLabelsByLibraryItemId = async (
         source: el.source,
       }))
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }

@@ -12,6 +12,7 @@ import type { Highlight } from '../../../lib/networking/fragments/highlightFragm
 import {
   getHighlightElements,
   highlightIdAttribute,
+  highlightLabelIdAttribute,
   highlightNoteIdAttribute,
   SelectionAttributes,
 } from '../../../lib/highlights/highlightHelpers'
@@ -23,14 +24,14 @@ import { showErrorToast, showSuccessToast } from '../../../lib/toastHelpers'
 import { ArticleMutations } from '../../../lib/articleActions'
 import { isTouchScreenDevice } from '../../../lib/deviceType'
 import { UserBasicData } from '../../../lib/networking/queries/useGetViewerQuery'
-import { ReadableItem } from '../../../lib/networking/queries/useGetLibraryItemsQuery'
+import { ReadableItem } from '../../../lib/networking/library_items/useLibraryItems'
 import { SetHighlightLabelsModalPresenter } from './SetLabelsModalPresenter'
-import SlidingPane from 'react-sliding-pane'
 import 'react-sliding-pane/dist/react-sliding-pane.css'
 import { NotebookContent } from './Notebook'
 import { NotebookHeader } from './NotebookHeader'
 import useGetWindowDimensions from '../../../lib/hooks/useGetWindowDimensions'
 import { ConfirmationModal } from '../../patterns/ConfirmationModal'
+import { ResizableSidebar } from './ResizableSidebar'
 
 type HighlightsLayerProps = {
   viewer: UserBasicData
@@ -38,9 +39,6 @@ type HighlightsLayerProps = {
   item: ReadableItem
   highlights: Highlight[]
 
-  articleId: string
-  articleTitle: string
-  articleAuthor: string
   isAppleAppEmbed: boolean
   highlightBarDisabled: boolean
   showHighlightsModal: boolean
@@ -79,15 +77,13 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
   const focusedHighlightMousePos = useRef({ pageX: 0, pageY: 0 })
 
   const [currentHighlightIdx, setCurrentHighlightIdx] = useState(0)
-  const [focusedHighlight, setFocusedHighlight] = useState<
-    Highlight | undefined
-  >(undefined)
+  const [focusedHighlight, setFocusedHighlight] =
+    useState<Highlight | undefined>(undefined)
 
   const [selectionData, setSelectionData] = useSelection(highlightLocations)
 
-  const [labelsTarget, setLabelsTarget] = useState<Highlight | undefined>(
-    undefined
-  )
+  const [labelsTarget, setLabelsTarget] =
+    useState<Highlight | undefined>(undefined)
 
   const [
     confirmDeleteHighlightWithNoteId,
@@ -104,7 +100,7 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
       const result = await createHighlight(
         {
           selection: selection,
-          articleId: props.articleId,
+          articleId: props.item.id,
           existingHighlights: highlights,
           color: options?.color,
           highlightStartEndOffsets: highlightLocations,
@@ -140,7 +136,7 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
     [
       highlightLocations,
       highlights,
-      props.articleId,
+      props.item.id,
       props.articleMutations,
       setSelectionData,
     ]
@@ -188,7 +184,7 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
 
       const didDeleteHighlight =
         await props.articleMutations.deleteHighlightMutation(
-          props.articleId,
+          props.item.id,
           highlightId
         )
 
@@ -225,7 +221,7 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
       updateHighlightsCallback(highlight)
       ;(async () => {
         const update = await props.articleMutations.updateHighlightMutation({
-          libraryItemId: props.articleId,
+          libraryItemId: props.item.id,
           highlightId: highlight.id,
           color: color,
         })
@@ -364,13 +360,15 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
           // highlight, so the app can display a native menu
           const rect = (target as Element).getBoundingClientRect()
 
-          window?.webkit?.messageHandlers.viewerAction?.postMessage({
-            actionID: 'showMenu',
-            rectX: rect.x,
-            rectY: rect.y,
-            rectWidth: rect.width,
-            rectHeight: rect.height,
-          })
+          if (window?.webkit?.messageHandlers) {
+            window?.webkit?.messageHandlers.viewerAction?.postMessage({
+              actionID: 'showMenu',
+              rectX: rect.x,
+              rectY: rect.y,
+              rectWidth: rect.width,
+              rectHeight: rect.height,
+            })
+          }
 
           window?.AndroidWebKitMessenger?.handleIdentifiableMessage(
             'existingHighlightTap',
@@ -388,14 +386,21 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
           highlight: highlight,
           highlightModalAction: 'addComment',
         })
-      } else {
+      } else if ((target as Element).hasAttribute(highlightLabelIdAttribute)) {
+        const id = (target as HTMLSpanElement).getAttribute(
+          highlightLabelIdAttribute
+        )
+        const highlight = highlights.find(($0) => $0.id === id)
+        setFocusedHighlight(highlight)
+        setLabelsTarget(highlight)
+      } else if (window?.webkit?.messageHandlers) {
         window?.webkit?.messageHandlers.viewerAction?.postMessage({
           actionID: 'pageTapped',
         })
         setFocusedHighlight(undefined)
       }
     },
-    [openNoteModal, highlights]
+    [openNoteModal, highlights, setLabelsTarget]
   )
 
   const handleDoubleClick = useCallback(
@@ -568,16 +573,15 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
       selectionData,
       setSelectionData,
       updateHighlightColor,
-      confirmDeleteHighlightWithNoteId,
     ]
   )
 
-  useEffect(() => {
-    if (props.highlightOnRelease && selectionData?.wasDragEvent) {
-      handleAction('create')
-      setSelectionData(null)
-    }
-  }, [selectionData, setSelectionData, handleAction, props.highlightOnRelease])
+  // useEffect(() => {
+  //   if (props.highlightOnRelease) {
+  //     handleAction('create')
+  //     setSelectionData(null)
+  //   }
+  // }, [selectionData, setSelectionData, handleAction, props.highlightOnRelease])
 
   const dispatchHighlightError = (action: string, error: unknown) => {
     if (props.isAppleAppEmbed) {
@@ -709,7 +713,7 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
         const annotation = event.annotation ?? ''
 
         const result = await props.articleMutations.updateHighlightMutation({
-          libraryItemId: props.articleId,
+          libraryItemId: props.item.id,
           highlightId: focusedHighlight.id,
           annotation: event.annotation ?? '',
         })
@@ -791,9 +795,8 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
       {highlightModalAction?.highlightModalAction == 'addComment' && (
         <HighlightNoteModal
           highlight={highlightModalAction.highlight}
-          author={props.articleAuthor}
-          title={props.articleTitle}
-          libraryItemId={props.articleId}
+          libraryItemId={props.item.id}
+          libraryItemSlug={props.item.slug}
           onUpdate={updateHighlightsCallback}
           onOpenChange={() =>
             setHighlightModalAction({ highlightModalAction: 'none' })
@@ -805,7 +808,10 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
         <SetHighlightLabelsModalPresenter
           highlight={labelsTarget}
           highlightId={labelsTarget.id}
-          onOpenChange={() => setLabelsTarget(undefined)}
+          onUpdate={updateHighlightsCallback}
+          onOpenChange={() => {
+            setLabelsTarget(undefined)
+          }}
         />
       )}
       {confirmDeleteHighlightWithNoteId && (
@@ -836,48 +842,41 @@ export function HighlightsLayer(props: HighlightsLayerProps): JSX.Element {
           />
         </>
       )}
-      <SlidingPane
-        className="sliding-pane-class"
-        isOpen={props.showHighlightsModal}
-        width={windowDimensions.width < 600 ? '100%' : '420px'}
-        hideHeader={true}
-        from="right"
-        overlayClassName="slide-panel-overlay"
-        onRequestClose={() => {
+      <ResizableSidebar
+        isShow={props.showHighlightsModal}
+        onClose={() => {
           props.setShowHighlightsModal(false)
         }}
       >
-        <>
-          <NotebookHeader
-            viewer={props.viewer}
-            item={props.item}
-            setShowNotebook={props.setShowHighlightsModal}
-          />
-          <NotebookContent
-            viewer={props.viewer}
-            item={props.item}
-            // highlights={highlights}
-            // onClose={handleCloseNotebook}
-            viewInReader={(highlightId) => {
-              // The timeout here is a bit of a hack to work around rerendering
-              setTimeout(() => {
-                const target = document.querySelector(
-                  `[omnivore-highlight-id="${highlightId}"]`
-                )
-                target?.scrollIntoView({
-                  block: 'center',
-                  behavior: 'auto',
-                })
-              }, 1)
-              history.replaceState(
-                undefined,
-                window.location.href,
-                `#${highlightId}`
+        <NotebookHeader
+          viewer={props.viewer}
+          item={props.item}
+          setShowNotebook={props.setShowHighlightsModal}
+        />
+        <NotebookContent
+          viewer={props.viewer}
+          item={props.item}
+          // highlights={highlights}
+          // onClose={handleCloseNotebook}
+          viewInReader={(highlightId) => {
+            // The timeout here is a bit of a hack to work around rerendering
+            setTimeout(() => {
+              const target = document.querySelector(
+                `[omnivore-highlight-id="${highlightId}"]`
               )
-            }}
-          />
-        </>
-      </SlidingPane>
+              target?.scrollIntoView({
+                block: 'center',
+                behavior: 'auto',
+              })
+            }, 1)
+            history.replaceState(
+              undefined,
+              window.location.href,
+              `#${highlightId}`
+            )
+          }}
+        />
+      </ResizableSidebar>
     </>
   )
 }

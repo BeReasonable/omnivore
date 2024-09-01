@@ -176,6 +176,15 @@ public struct InternalFilter: Encodable, Identifiable, Hashable, Equatable {
         defaultFilter: true
       ),
       InternalFilter(
+        id: "following_unread",
+        name: "Unread",
+        folder: "following",
+        filter: "in:following is:unread",
+        visible: true,
+        position: 11,
+        defaultFilter: true
+      ),
+      InternalFilter(
         id: "rss",
         name: "Feeds",
         folder: "following",
@@ -206,6 +215,10 @@ public struct InternalFilter: Encodable, Identifiable, Hashable, Equatable {
 
   public var allowLocalFetch: Bool {
     predicate != nil
+  }
+
+  public var ignoreFolders: Bool {
+    return name == "Deleted"
   }
 
   public var predicate: NSPredicate? {

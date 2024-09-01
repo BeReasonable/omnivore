@@ -44,23 +44,25 @@
   font-family: var(--text-font-family);
 }
 
-.article-inner-css .highlight_with_note .highlight_note_button {
+.article-inner-css .highlight_note_button {
   display: unset !important;
   margin: 0px !important;
   max-width: unset !important;
   height: unset !important;
   padding: 0px 8px;
   cursor: pointer;
+  margin-left: 5px !important;
 }
-/* 
-on smaller screens we display the note icon
-@media (max-width: 768px) {
-  .highlight_with_note.last_element:after { 
-    content: url(/static/icons/highlight-note-icon.svg);
-    padding: 0 3px;
-    cursor: pointer;
-  }
-} */
+
+.article-inner-css .highlight_label_button {
+  display: unset !important;
+  margin: 0px !important;
+  max-width: unset !important;
+  height: unset !important;
+  padding: 0px 8px;
+  cursor: pointer;
+  margin-left: 4px !important;
+}
 
 .article-inner-css h1,
 .article-inner-css h2,
@@ -84,7 +86,7 @@ on smaller screens we display the note icon
   font-size: 1.43em !important;
 }
 .article-inner-css h3 {
-  font-size: 1.25em !important;
+  font-size: 1.0em !important;
 }
 .article-inner-css h4,
 .article-inner-css h5,
@@ -271,6 +273,7 @@ on smaller screens we display the note icon
   ul {
     margin: 0;
   }
+  text-align: left;
 }
 
 .article-inner-css sup,
@@ -608,3 +611,64 @@ on smaller screens we display the note icon
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
+
+.is-sticky {
+  position: fixed;
+  right: 5px;
+  bottom: 5px;
+  top: auto;
+  left: auto;
+  z-index: 10;
+  max-width: 400px;
+  max-height: 222px;
+  width: 400px;
+  height: 222px;
+  animation-name: fadeInUp;
+  animation-duration: 0.5s;
+  animation-fill-mode: both;
+  -webkit-animation-name: fadeInUp;
+  -webkit-animation-duration: 0.5s;
+  -webkit-animation-fill-mode: both;
+  overflow: hidden;
+  box-shadow: 0px 4px 4px rgba(33, 33, 33, 0.1) !important;
+}
+
+@media (max-width: 600px) {
+  .is-sticky {
+    max-width: 200px;
+    max-height: 110px;
+  }
+}
+
+
+@keyframes fadeInUp {
+  0% {
+      opacity: 0;
+      -webkit-transform: translate3d(0, 100%, 0);
+      transform: translate3d(0, 100%, 0);
+  }
+  100% {
+      opacity: 1;
+      -webkit-transform: none;
+      transform: none;
+  }
+}
+
+@-webkit-keyframes fadeInUp {
+  0% {
+      opacity: 0;
+      -webkit-transform: translate3d(0, 100%, 0);
+      transform: translate3d(0, 100%, 0);
+  }
+  100% {
+      opacity: 1;
+      -webkit-transform: none;
+      transform: none;
+  }
+}
+
+.youtubeplaceholder {
+  border: 2px dashed #aaa;
+  box-sizing: border-box;
+}
+

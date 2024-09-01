@@ -27,6 +27,7 @@ interface EmailMessage {
   text: string
   forwardedFrom?: string
   receivedEmailId: string
+  replyTo?: string
 }
 
 function isEmailMessage(data: any): data is EmailMessage {
@@ -82,7 +83,7 @@ export function emailsServiceRouter() {
         const savedNewsletter = await saveNewsletter(
           {
             title: getTitleFromEmailSubject(data.subject),
-            author: parsedFrom.name,
+            author: parsedFrom.name || data.from,
             url: generateUniqueUrl(),
             content: data.html || data.text,
             receivedEmailId: data.receivedEmailId,
@@ -99,8 +100,8 @@ export function emailsServiceRouter() {
         return
       }
 
-      analytics.track({
-        userId: user.id,
+      analytics.capture({
+        distinctId: user.id,
         event: 'non_newsletter_email_received',
         properties: {
           env: env.server.apiEnv,
@@ -165,11 +166,13 @@ export function emailsServiceRouter() {
         req.body.subject,
         req.body.text,
         req.body.html,
-        user.id
+        user.id,
+        'non-article',
+        req.body.replyTo
       )
 
-      analytics.track({
-        userId: user.id,
+      analytics.capture({
+        distinctId: user.id,
         event: 'received_email_saved',
         properties: {
           env: env.server.apiEnv,

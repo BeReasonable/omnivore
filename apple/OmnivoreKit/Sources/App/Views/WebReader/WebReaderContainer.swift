@@ -1,6 +1,5 @@
 import AVFoundation
 import Models
-import PopupView
 import Services
 import SwiftUI
 import Transmission
@@ -10,8 +9,8 @@ import WebKit
 
 // swiftlint:disable file_length type_body_length
 struct WebReaderContainerView: View {
-  let item: Models.LibraryItem
-  let pop: () -> Void
+  @State var item: Models.LibraryItem
+  @Environment(\.presentationCoordinator) var presentationCoordinator
 
   @State private var showPreferencesPopover = false
   @State private var showPreferencesFormsheet = false
@@ -22,11 +21,13 @@ struct WebReaderContainerView: View {
   @State private var hasPerformedHighlightMutations = false
   @State var showHighlightAnnotationModal = false
   @State private var navBarVisible = true
+  @State var showBottomBar = true
   @State private var progressViewOpacity = 0.0
   @State var readerSettingsChangedTransactionID: UUID?
   @State var annotationSaveTransactionID: UUID?
   @State var showNavBarActionID: UUID?
   @State var showExpandedAudioPlayer = false
+  @State var showLibraryDigest = false
   @State var shareActionID: UUID?
   @State var annotation = String()
   @State private var bottomBarOpacity = 0.0
@@ -41,11 +42,14 @@ struct WebReaderContainerView: View {
   @State var displayLinkSheet = false
   @State var linkToOpen: URL?
 
+  @State var showExplainSheet = false
+
+  @State var handoffActivity: NSUserActivity?
+
   @EnvironmentObject var dataService: DataService
   @EnvironmentObject var audioController: AudioController
   @Environment(\.openURL) var openURL
   @StateObject var viewModel = WebReaderViewModel()
-  @Environment(\.dismiss) var dismiss
 
   @AppStorage(UserDefaultKey.prefersHideStatusBarInReader.rawValue) var prefersHideStatusBarInReader = false
 
@@ -88,8 +92,14 @@ struct WebReaderContainerView: View {
   private func tapHandler() {
     withAnimation(.easeIn(duration: 0.08)) {
       navBarVisible = !navBarVisible
+      showBottomBar = navBarVisible
       showNavBarActionID = UUID()
     }
+  }
+
+  private func explainHandler(text: String) {
+    viewModel.explainText = String(text)
+    showExplainSheet = true
   }
 
   private func handleHighlightAction(message: WKScriptMessage) {
@@ -116,6 +126,7 @@ struct WebReaderContainerView: View {
     case "dismissNavBars":
       withAnimation {
         navBarVisible = false
+        showBottomBar = false
         showNavBarActionID = UUID()
       }
     default:
@@ -125,7 +136,7 @@ struct WebReaderContainerView: View {
 
   #if os(iOS)
     var audioNavbarItem: some View {
-      if !audioController.playbackError, audioController.isLoadingItem(itemID: item.unwrappedID) {
+      if audioController.isLoadingItem(audioController.itemAudioProperties) {
         return AnyView(ProgressView()
           .padding(.horizontal))
       } else {
@@ -233,6 +244,10 @@ struct WebReaderContainerView: View {
         action: copyDeeplink,
         label: { Label("Copy Deeplink", systemImage: "link") }
       )
+//      Button(
+//        action: print,
+//        label: { Label("Print", systemImage: "printer") }
+//      )
       Button(
         action: delete,
         label: { Label("Remove", systemImage: "trash") }
@@ -253,7 +268,7 @@ struct WebReaderContainerView: View {
       #if os(iOS)
         Button(
           action: {
-            pop()
+            presentationCoordinator.dismiss()
           },
           label: {
             Image.chevronRight
@@ -265,6 +280,13 @@ struct WebReaderContainerView: View {
 
         Spacer()
       #endif
+
+//      Button(
+//        action: { showExplainSheet = true },
+//        label: { Image(systemName: "sparkles") }
+//      )
+//      .buttonStyle(.plain)
+//      .padding(.trailing, 4)
 
       Button(
         action: { showLabelsModal = true },
@@ -303,10 +325,13 @@ struct WebReaderContainerView: View {
         .padding(.trailing, 5)
         .popover(isPresented: $showPreferencesPopover) {
           webPreferencesPopoverView
-            .frame(maxWidth: 400, maxHeight: 475)
+            .frame(width: 400, height: 475)
         }
         .formSheet(isPresented: $showPreferencesFormsheet, modalSize: CGSize(width: 400, height: 475)) {
           webPreferencesPopoverView
+        }
+        .formSheet(isPresented: $showExplainSheet, modalSize: CGSize(width: 400, height: 475)) {
+          explainView
         }
       #endif
 
@@ -353,14 +378,12 @@ struct WebReaderContainerView: View {
     }
   #endif
 
+  var explainView: some View {
+    ExplainView(dataService: dataService, text: viewModel.explainText ?? "Nothing to explain", item: item)
+  }
+
   var body: some View {
     ZStack {
-      WindowLink(level: .alert, transition: .move(edge: .bottom), isPresented: $viewModel.showOperationToast) {
-        OperationToast(operationMessage: $viewModel.operationMessage, showOperationToast: $viewModel.showOperationToast, operationStatus: $viewModel.operationStatus)
-      } label: {
-        EmptyView()
-      }.buttonStyle(.plain)
-
       if let articleContent = viewModel.articleContent {
         WebReader(
           item: item,
@@ -379,11 +402,13 @@ struct WebReaderContainerView: View {
             #endif
           },
           tapHandler: tapHandler,
+          explainHandler: dataService.featureFlags.explainEnabled ? explainHandler : nil,
           scrollPercentHandler: scrollPercentHandler,
           webViewActionHandler: webViewActionHandler,
           navBarVisibilityUpdater: { visible in
             withAnimation {
               navBarVisible = visible
+              showBottomBar = visible
             }
           },
           readerSettingsChangedTransactionID: $readerSettingsChangedTransactionID,
@@ -391,6 +416,7 @@ struct WebReaderContainerView: View {
           showNavBarActionID: $showNavBarActionID,
           shareActionID: $shareActionID,
           annotation: $annotation,
+          showBottomBar: $showBottomBar,
           showHighlightAnnotationModal: $showHighlightAnnotationModal
         )
         .background(ThemeManager.currentBgColor)
@@ -398,30 +424,48 @@ struct WebReaderContainerView: View {
           .statusBar(hidden: prefersHideStatusBarInReader)
         #endif
         .onAppear {
+          startUserActivity()
+
           dataService.updateLinkReadingProgress(
             itemID: item.unwrappedID,
             readingProgress: max(item.readingProgress, 0.1),
             anchorIndex: Int(item.readingProgressAnchor),
             force: false
           )
-          Task {
-            await audioController.preload(itemIDs: [item.unwrappedID])
+          viewModel.trackReadEvent(item: item)
+
+          // Wait 1.5s while loading the reader before attempting to preload the speech file
+          DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1500)) {
+            Task {
+              await audioController.preload(itemIDs: [item.unwrappedID])
+            }
           }
+        }
+        .onDisappear {
+          stopUserActivity()
         }
         .confirmationDialog(linkToOpen?.absoluteString ?? "", isPresented: $displayLinkSheet,
                             titleVisibility: .visible) {
           Button(action: {
             if let linkToOpen = linkToOpen {
-              safariWebLink = SafariWebLink(id: UUID(), url: linkToOpen)
+              if UserDefaults.standard.string(forKey: UserDefaultKey.openExternalLinksIn.rawValue) == OpenLinkIn.systemBrowser.rawValue, UIApplication.shared.canOpenURL(linkToOpen) {
+                UIApplication.shared.open(linkToOpen)
+              } else {
+                safariWebLink = SafariWebLink(id: UUID(), url: linkToOpen)
+              }
             }
           }, label: { Text(LocalText.genericOpen) })
           Button(action: {
-            #if os(iOS)
-              UIPasteboard.general.string = item.unwrappedPageURLString
-            #else
-              //            Pasteboard.general.string = item.unwrappedPageURLString TODO: fix for mac
-            #endif
-            showInLibrarySnackbar("Link Copied")
+            if let linkToOpen = linkToOpen?.absoluteString {
+#if os(iOS)
+              UIPasteboard.general.string = linkToOpen
+#else
+              // Pasteboard.general.string = item.unwrappedPageURLString TODO: fix for mac
+#endif
+              Snackbar.show(message: "Link copied", dismissAfter: 2000)
+            } else {
+              Snackbar.show(message: "Error copying link", dismissAfter: 2000)
+            }
           }, label: { Text(LocalText.readerCopyLink) })
           Button(action: {
             if let linkToOpen = linkToOpen {
@@ -430,7 +474,7 @@ struct WebReaderContainerView: View {
           }, label: { Text(LocalText.readerSave) })
         }
         #if os(iOS)
-          .sheet(item: $safariWebLink) {
+          .fullScreenCover(item: $safariWebLink) {
             SafariView(url: $0.url)
               .ignoresSafeArea(.all, edges: .bottom)
           }
@@ -446,6 +490,15 @@ struct WebReaderContainerView: View {
             }, viewArticle: { _ in
               showExpandedAudioPlayer = false
             })
+          }
+          .fullScreenCover(isPresented: $showLibraryDigest) {
+            if #available(iOS 17.0, *) {
+              NavigationView {
+                FullScreenDigestView(dataService: dataService, audioController: audioController)
+              }
+            } else {
+              Text("Sorry digest is only available on iOS 17 and above")
+            }
           }
         #endif
         .alert(errorAlertMessage ?? LocalText.readerError, isPresented: $showErrorAlertMessage) {
@@ -499,17 +552,17 @@ struct WebReaderContainerView: View {
             }
           }
         }
-        .sheet(isPresented: $showLabelsModal) {
-          ApplyLabelsView(mode: .item(item), onSave: { labels in
-            showLabelsModal = false
-            item.labels = NSSet(array: labels)
-            readerSettingsChangedTransactionID = UUID()
-          })
-        }
         .sheet(isPresented: $showTitleEdit) {
           LinkedItemMetadataEditView(item: item, onSave: { title, _ in
             item.title = title
             // We dont need to update description because its never rendered in this view
+            readerSettingsChangedTransactionID = UUID()
+          })
+        }
+        .sheet(isPresented: $showLabelsModal) {
+          ApplyLabelsView(mode: .item(item), onSave: { labels in
+            showLabelsModal = false
+            item.labels = NSSet(array: labels)
             readerSettingsChangedTransactionID = UUID()
           })
         }
@@ -533,7 +586,7 @@ struct WebReaderContainerView: View {
                   self.isRecovering = true
                   Task {
                     if !(await dataService.recoverItem(itemID: item.unwrappedID)) {
-                      viewModel.snackbar(message: "Error recovering item")
+                      Snackbar.show(message: "Error recoviering item", dismissAfter: 2000)
                     } else {
                       await viewModel.loadContent(
                         dataService: dataService,
@@ -586,16 +639,20 @@ struct WebReaderContainerView: View {
             .offset(y: navBarVisible ? 0 : -150)
 
           Spacer()
-          if let audioProperties = audioController.itemAudioProperties {
-            MiniPlayerViewer(itemAudioProperties: audioProperties)
+          if audioController.itemAudioProperties != nil {
+            MiniPlayerViewer()
               .padding(.top, 10)
-              .padding(.bottom, navBarVisible ? 10 : 40)
+              .padding(.bottom, showBottomBar ? 10 : 40)
               .background(Color.themeTabBarColor)
               .onTapGesture {
-                showExpandedAudioPlayer = true
+                if audioController.itemAudioProperties?.audioItemType == .digest {
+                  showLibraryDigest = true
+                } else {
+                  showExpandedAudioPlayer = true
+                }
               }
           }
-          if navBarVisible {
+          if showBottomBar {
             CustomToolBar(
               isFollowing: item.folder == "following",
               isArchived: item.isArchived,
@@ -619,51 +676,21 @@ struct WebReaderContainerView: View {
       try? WebViewManager.shared().dispatchEvent(.saveReadPosition)
     }
     .onDisappear {
-      // WebViewManager.shared().loadHTMLString("<html></html>", baseURL: nil)
       WebViewManager.shared().loadHTMLString(WebReaderContent.emptyContent(isDark: Color.isDarkMode), baseURL: nil)
     }
     .onReceive(NotificationCenter.default.publisher(for: Notification.Name("PopToRoot"))) { _ in
-      pop()
-    }
-    .popup(isPresented: $viewModel.showSnackbar) {
-      if let operation = viewModel.snackbarOperation {
-        Snackbar(isShowing: $viewModel.showSnackbar, operation: operation)
-      } else {
-        EmptyView()
-      }
-    } customize: {
-      $0
-        .type(.toast)
-        .autohideIn(2)
-        .position(.bottom)
-        .animation(.spring())
-        .isOpaque(false)
+      presentationCoordinator.dismiss()
     }
     .ignoresSafeArea(.all, edges: .bottom)
-    .onReceive(NSNotification.readerSnackBarPublisher) { notification in
-      if let message = notification.userInfo?["message"] as? String {
-        viewModel.snackbarOperation = SnackbarOperation(message: message,
-                                                        undoAction: notification.userInfo?["undoAction"] as? SnackbarUndoAction)
-        viewModel.showSnackbar = true
-      }
-    }
   }
 
   func moveToInbox() {
     Task {
-      viewModel.showOperationToast = true
-      viewModel.operationMessage = "Moving to library..."
-      viewModel.operationStatus = .isPerforming
       do {
         try await dataService.moveItem(itemID: item.unwrappedID, folder: "inbox")
-        viewModel.operationMessage = "Moved to library"
-        viewModel.operationStatus = .success
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1500)) {
-          viewModel.showOperationToast = false
-        }
+        Snackbar.show(message: "Moved to library", dismissAfter: 2000)
       } catch {
-        viewModel.operationMessage = "Error moving"
-        viewModel.operationStatus = .failure
+        Snackbar.show(message: "Error moving item to inbox", dismissAfter: 2000)
       }
     }
   }
@@ -672,7 +699,12 @@ struct WebReaderContainerView: View {
     let isArchived = item.isArchived
     dataService.archiveLink(objectID: item.objectID, archived: !isArchived)
     #if os(iOS)
-      pop()
+      presentationCoordinator.dismiss()
+
+    Snackbar.show(message: isArchived ? "Unarchived" : "Archived", undoAction: {
+      dataService.archiveLink(objectID: item.objectID, archived: isArchived)
+      Snackbar.show(message: isArchived ? "Archived" : "Unarchived", dismissAfter: 2000)
+    }, dismissAfter: 2000)
     #endif
   }
 
@@ -681,6 +713,10 @@ struct WebReaderContainerView: View {
   }
 
   func share() {
+    shareActionID = UUID()
+  }
+
+  func printReader() {
     shareActionID = UUID()
   }
 
@@ -693,14 +729,15 @@ struct WebReaderContainerView: View {
         pasteBoard.clearContents()
         pasteBoard.writeObjects([deepLink.absoluteString as NSString])
       #endif
-      showInLibrarySnackbar("Deeplink Copied")
+      Snackbar.show(message: "Deeplink Copied", dismissAfter: 2000)
     } else {
-      showInLibrarySnackbar("Error copying deeplink")
+      Snackbar.show(message: "Error copying deeplink", dismissAfter: 2000)
     }
   }
 
   func delete() {
-    pop()
+    presentationCoordinator.dismiss()
+
     #if os(iOS)
       DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) {
         removeLibraryItemAction(dataService: dataService, objectID: item.objectID)
@@ -721,5 +758,24 @@ struct WebReaderContainerView: View {
     else { return }
 
     openURL(url)
+  }
+
+  func startUserActivity() {
+    if let slug = item.slug,
+       let webpageURL = URL(string: "\(dataService.appEnvironment.webAppBaseURL)/me/\(slug)") {
+      let activity = NSUserActivity(activityType: "com.omnivore.omnivore.openURL")
+      activity.title = "Open in browser"
+      activity.webpageURL = webpageURL
+      activity.isEligibleForHandoff = true
+      activity.becomeCurrent()
+      handoffActivity = activity
+    }
+  }
+
+  func stopUserActivity() {
+    self.handoffActivity = nil
+    Task {
+      await NSUserActivity.deleteAllSavedUserActivities()
+    }
   }
 }

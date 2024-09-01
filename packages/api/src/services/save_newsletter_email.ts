@@ -28,8 +28,8 @@ export const saveNewsletter = async (
   newsletterEmail: NewsletterEmail,
   existingSubscription?: Subscription
 ): Promise<boolean> => {
-  analytics.track({
-    userId: newsletterEmail.user.id,
+  analytics.capture({
+    distinctId: newsletterEmail.user.id,
     event: 'newsletter_email_received',
     properties: {
       url: data.url,
@@ -76,59 +76,5 @@ export const saveNewsletter = async (
     return false
   }
 
-  // sends push notification
-  // const deviceTokens = await getDeviceTokensByUserId(newsletterEmail.user.id)
-  // if (!deviceTokens) {
-  //   logger.info('Device tokens not set:', newsletterEmail.user.id)
-  //   return true
-  // }
-
-  // const multicastMessage = messageForLink(page, deviceTokens)
-  // await sendMulticastPushNotifications(
-  //   newsletterEmail.user.id,
-  //   multicastMessage,
-  //   'newsletter'
-  // )
-
   return true
 }
-
-// const messageForLink = (
-//   link: Page,
-//   deviceTokens: UserDeviceToken[]
-// ): MulticastMessage => {
-//   let title = '📫 - An article was added to your Omnivore Inbox'
-
-//   if (link.author) {
-//     title = `📫 - ${link.author} has published a new article`
-//   }
-
-//   const pushData = !link
-//     ? undefined
-//     : {
-//         link: Buffer.from(
-//           JSON.stringify({
-//             id: link.id,
-//             url: link.url,
-//             slug: link.slug,
-//             title: link.title,
-//             image: link.image,
-//             author: link.author,
-//             isArchived: !!link.archivedAt,
-//             contentReader: ContentReader.Web,
-//             readingProgressPercent: link.readingProgressPercent,
-//             readingProgressAnchorIndex: link.readingProgressAnchorIndex,
-//           })
-//         ).toString('base64'),
-//       }
-
-//   return {
-//     notification: {
-//       title: title,
-//       body: link.title,
-//       imageUrl: link.image || undefined,
-//     },
-//     data: pushData,
-//     tokens: deviceTokens.map((token) => token.token),
-//   }
-// }

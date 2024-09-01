@@ -1,4 +1,3 @@
-import AsyncAlgorithms
 import CoreData
 import CoreImage
 import Foundation
@@ -26,7 +25,6 @@ public final class DataService: ObservableObject {
   public let networker: Networker
 
   public let prefetchQueue = OperationQueue()
-  public let itemLoaderChannel = AsyncChannel<String>()
 
   var persistentContainer: PersistentContainer
   public var backgroundContext: NSManagedObjectContext
@@ -34,6 +32,8 @@ public final class DataService: ObservableObject {
   public var viewContext: NSManagedObjectContext {
     persistentContainer.viewContext
   }
+
+  public var featureFlags = FeatureFlags()
 
   public var lastItemSyncTime: Date {
     get {
@@ -299,5 +299,12 @@ public final class DataService: ObservableObject {
       }
     }
     return objectID
+  }
+
+  public func tryUpdateFeatureFlags() async {
+    if let features = (try? await fetchViewer())?.enabledFeatures {
+      featureFlags.digestEnabled = features.contains("ai-digest")
+      featureFlags.explainEnabled = features.contains("ai-explain")
+    }
   }
 }

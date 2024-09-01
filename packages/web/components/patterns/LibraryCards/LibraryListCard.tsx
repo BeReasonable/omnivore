@@ -2,19 +2,18 @@ import { Box, VStack, HStack, SpanBox } from '../../elements/LayoutPrimitives'
 import { LabelChip } from '../../elements/LabelChip'
 import type { LinkedItemCardProps } from './CardTypes'
 import { useCallback, useState } from 'react'
-import Link from 'next/link'
 import {
   AuthorInfoStyle,
   CardCheckbox,
   LibraryItemMetadata,
   MetaStyle,
-  siteName,
   TitleStyle,
   MenuStyle,
   FLAIR_ICON_NAMES,
 } from './LibraryCardStyles'
+import { shouldHideUrl, siteName } from '../../../lib/textFormatting'
 import { sortedLabels } from '../../../lib/labelsSort'
-import { LIBRARY_LEFT_MENU_WIDTH } from '../../templates/homeFeed/LibraryFilterMenu'
+import { LIBRARY_LEFT_MENU_WIDTH } from '../../templates/navMenu/LibraryMenu'
 import { LibraryHoverActions } from './LibraryHoverActions'
 import {
   useHover,
@@ -25,7 +24,7 @@ import {
   autoUpdate,
 } from '@floating-ui/react'
 import { CardMenu } from '../CardMenu'
-import { DotsThree } from 'phosphor-react'
+import { DotsThree } from '@phosphor-icons/react'
 import { isTouchScreenDevice } from '../../../lib/deviceType'
 import { CoverImage } from '../../elements/CoverImage'
 import { ProgressBar } from '../../elements/ProgressBar'
@@ -55,6 +54,26 @@ export function LibraryListCard(props: LinkedItemCardProps): JSX.Element {
 
   const { getReferenceProps, getFloatingProps } = useInteractions([hover])
 
+  const layoutWidths = props.legacyLayout
+    ? {
+        width: '100vw',
+        '@media (min-width: 768px)': {
+          width: `calc(100vw - ${LIBRARY_LEFT_MENU_WIDTH})`,
+        },
+        '@media (min-width: 930px)': {
+          width: '580px',
+        },
+        '@media (min-width: 1280px)': {
+          width: '890px',
+        },
+        '@media (min-width: 1600px)': {
+          width: '1200px',
+        },
+      }
+    : {
+        width: '100%',
+      }
+
   return (
     <VStack
       ref={refs.setReference}
@@ -66,32 +85,25 @@ export function LibraryListCard(props: LinkedItemCardProps): JSX.Element {
         height: '100%',
         cursor: 'pointer',
         gap: '10px',
-        border: '1px solid $grayBorder',
-        borderBottom: 'none',
-        borderRadius: '6px',
-        width: '100vw',
-        '@media (min-width: 768px)': {
-          width: `calc(100vw - ${LIBRARY_LEFT_MENU_WIDTH})`,
-        },
-        '@media (min-width: 930px)': {
-          width: '640px',
-        },
-        '@media (min-width: 1280px)': {
-          width: '1000px',
-        },
-        '@media (min-width: 1600px)': {
-          width: '1340px',
-        },
-        boxShadow:
-          '0 1px 3px 0 rgba(0, 0, 0, 0.1),0 1px 2px 0 rgba(0, 0, 0, 0.06);',
+        borderBottom: props.legacyLayout
+          ? 'unset'
+          : '1px solid $thLeftMenuBackground',
         '@media (max-width: 930px)': {
-          boxShadow: 'unset',
-          borderRadius: 'unset',
+          borderRadius: '0px',
         },
+        '&:hover': {
+          borderBottom: 'unset',
+        },
+        ...layoutWidths,
       }}
       alignment="start"
       distribution="start"
       onClick={(event) => {
+        if (props.multiSelectMode !== 'off') {
+          props.setIsChecked(props.item.id, !props.isChecked)
+          return
+        }
+        window.localStorage.setItem('nav-return', router.asPath)
         if (event.metaKey || event.ctrlKey) {
           window.open(
             `/${props.viewer.profile.username}/${props.item.slug}`,
@@ -102,7 +114,7 @@ export function LibraryListCard(props: LinkedItemCardProps): JSX.Element {
         }
       }}
     >
-      {!isTouchScreenDevice() && (
+      {!isTouchScreenDevice() && props.multiSelectMode == 'off' && (
         <Box
           ref={refs.setFloating}
           style={{ ...floatingStyles, zIndex: 3 }}

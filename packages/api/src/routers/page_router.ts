@@ -13,7 +13,7 @@ import { PageType, UploadFileStatus } from '../generated/graphql'
 import { authTrx } from '../repository'
 import { Claims } from '../resolvers/types'
 import {
-  createLibraryItem,
+  createOrUpdateLibraryItem,
   findLibraryItemById,
   findLibraryItemByUrl,
   restoreLibraryItem,
@@ -82,8 +82,9 @@ export function pageRouter() {
           status: UploadFileStatus.Initialized,
           contentType: 'application/pdf',
         }),
-      undefined,
-      claims.uid
+      {
+        uid: claims.uid,
+      }
     )
 
     const uploadFilePathName = generateUploadFilePathName(
@@ -101,13 +102,12 @@ export function pageRouter() {
     if (item) {
       await restoreLibraryItem(item.id, claims.uid)
     } else {
-      await createLibraryItem(
+      await createOrUpdateLibraryItem(
         {
           originalUrl: signedUrl,
           id: clientRequestId,
           user: { id: claims.uid },
           title,
-          originalContent: '',
           itemType: PageType.File,
           uploadFile: { id: uploadFileData.id },
           slug: generateSlug(uploadFilePathName),
@@ -146,7 +146,11 @@ export function pageRouter() {
         return res.status(400).send({ errorCode: 'BAD_DATA' })
       }
 
-      const item = await findLibraryItemById(itemId, claims.uid)
+      const item = await findLibraryItemById(itemId, claims.uid, {
+        relations: {
+          highlights: true,
+        },
+      })
       if (!item) {
         return res.status(404).send({ errorCode: 'NOT_FOUND' })
       }

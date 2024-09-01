@@ -11,8 +11,9 @@ export const findDeviceTokenById = async (
   return authTrx(
     (t) =>
       t.getRepository(UserDeviceToken).findOneBy({ id, user: { id: userId } }),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -25,8 +26,9 @@ export const findDeviceTokenByToken = async (
       t
         .getRepository(UserDeviceToken)
         .findOneBy({ token, user: { id: userId } }),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -38,8 +40,9 @@ export const findDeviceTokensByUserId = async (
       t.getRepository(UserDeviceToken).findBy({
         user: { id: userId },
       }),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -47,8 +50,8 @@ export const createDeviceToken = async (
   userId: string,
   token: string
 ): Promise<UserDeviceToken> => {
-  analytics.track({
-    userId: userId,
+  analytics.capture({
+    distinctId: userId,
     event: 'device_token_created',
     properties: {
       env: env.server.apiEnv,
@@ -61,8 +64,9 @@ export const createDeviceToken = async (
         token,
         user: { id: userId },
       }),
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }
 
@@ -70,8 +74,8 @@ export const deleteDeviceToken = async (
   id: string,
   userId: string
 ): Promise<boolean> => {
-  analytics.track({
-    userId: userId,
+  analytics.capture({
+    distinctId: userId,
     event: 'device_token_deleted',
     properties: {
       env: env.server.apiEnv,
@@ -95,7 +99,8 @@ export const deleteDeviceTokens = async (
     async (t) => {
       await t.getRepository(UserDeviceToken).delete(criteria)
     },
-    undefined,
-    userId
+    {
+      uid: userId,
+    }
   )
 }

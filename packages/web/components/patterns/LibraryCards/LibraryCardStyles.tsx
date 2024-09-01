@@ -1,16 +1,12 @@
-import dayjs from 'dayjs'
-import relativeTime from 'dayjs/plugin/relativeTime'
-import { ChangeEvent, useMemo } from 'react'
-import { LibraryItemNode } from '../../../lib/networking/queries/useGetLibraryItemsQuery'
-import { Box, HStack, SpanBox, VStack } from '../../elements/LayoutPrimitives'
+import { LibraryItemNode } from '../../../lib/networking/library_items/useLibraryItems'
+import { HStack, SpanBox } from '../../elements/LayoutPrimitives'
 import { RecommendedFlairIcon } from '../../elements/icons/RecommendedFlairIcon'
 import { PinnedFlairIcon } from '../../elements/icons/PinnedFlairIcon'
 import { FavoriteFlairIcon } from '../../elements/icons/FavoriteFlairIcon'
 import { NewsletterFlairIcon } from '../../elements/icons/NewsletterFlairIcon'
 import { FeedFlairIcon } from '../../elements/icons/FeedFlairIcon'
 import { Label } from '../../../lib/networking/fragments/labelFragment'
-
-dayjs.extend(relativeTime)
+import { timeAgo } from '../../../lib/textFormatting'
 
 export const MenuStyle = {
   display: 'flex',
@@ -45,7 +41,7 @@ export const TitleStyle = {
   fontSize: '16px',
   fontWeight: '700',
   maxLines: 2,
-  lineHeight: 1.25,
+  lineHeight: 1.5,
   fontFamily: '$display',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -69,26 +65,6 @@ export const AuthorInfoStyle = {
   textOverflow: 'ellipsis',
 }
 
-export const timeAgo = (date: string | undefined): string => {
-  if (!date) {
-    return ''
-  }
-  return dayjs(date).fromNow()
-}
-
-const shouldHideUrl = (url: string): boolean => {
-  try {
-    const origin = new URL(url).origin
-    const hideHosts = ['https://storage.googleapis.com', 'https://omnivore.app']
-    if (hideHosts.indexOf(origin) != -1) {
-      return true
-    }
-  } catch {
-    console.log('invalid url item', url)
-  }
-  return false
-}
-
 export const FLAIR_ICON_NAMES = [
   'favorite',
   'pinned',
@@ -102,58 +78,50 @@ const flairIconForLabel = (label: Label): JSX.Element | undefined => {
   switch (label.name.toLocaleLowerCase()) {
     case 'favorite':
       return (
-        <SpanBox title="Favorite">
+        <FlairIcon title="Favorite">
           <FavoriteFlairIcon />
-        </SpanBox>
+        </FlairIcon>
       )
     case 'pinned':
       return (
-        <SpanBox title="Pinned">
+        <FlairIcon title="Pinned">
           <PinnedFlairIcon />
-        </SpanBox>
+        </FlairIcon>
       )
     case 'recommended':
       return (
-        <SpanBox title="Recommended">
+        <FlairIcon title="Recommended">
           <RecommendedFlairIcon />
-        </SpanBox>
+        </FlairIcon>
       )
     case 'newsletter':
       return (
-        <SpanBox title="Newsletter">
+        <FlairIcon title="Newsletter">
           <NewsletterFlairIcon />
-        </SpanBox>
+        </FlairIcon>
       )
     case 'rss':
     case 'feed':
       return (
-        <SpanBox title="Feed">
+        <FlairIcon title="Feed">
           <FeedFlairIcon />
-        </SpanBox>
+        </FlairIcon>
       )
   }
   return undefined
 }
 
-export const siteName = (
-  originalArticleUrl: string,
-  itemUrl: string,
-  siteName?: string
-): string => {
-  if (siteName) {
-    return siteName
-  }
+type FlairIconProps = {
+  title: string
+  children: React.ReactNode
+}
 
-  if (shouldHideUrl(originalArticleUrl)) {
-    return ''
-  }
-  try {
-    return new URL(originalArticleUrl).hostname.replace(/^www\./, '')
-  } catch {}
-  try {
-    return new URL(itemUrl).hostname.replace(/^www\./, '')
-  } catch {}
-  return ''
+export function FlairIcon(props: FlairIconProps): JSX.Element {
+  return (
+    <SpanBox title={props.title} css={{ lineHeight: '1' }}>
+      {props.children}
+    </SpanBox>
+  )
 }
 
 type LibraryItemMetadataProps = {
@@ -164,14 +132,10 @@ type LibraryItemMetadataProps = {
 export function LibraryItemMetadata(
   props: LibraryItemMetadataProps
 ): JSX.Element {
-  const highlightCount = useMemo(() => {
-    return (
-      props.item.highlights?.filter((h) => h.type == 'HIGHLIGHT').length ?? 0
-    )
-  }, [props.item.highlights])
+  const highlightCount = props.item.highlightsCount ?? 0
 
   return (
-    <HStack css={{ gap: '5px' }}>
+    <HStack css={{ gap: '5px', alignItems: 'center' }}>
       {props.item.labels?.map((label) => {
         return flairIconForLabel(label)
       })}

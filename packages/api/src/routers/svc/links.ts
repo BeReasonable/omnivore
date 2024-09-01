@@ -2,11 +2,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/explicit-module-boundary-types */
 import express from 'express'
-import { LessThan } from 'typeorm'
-import { LibraryItemState } from '../../entity/library_item'
 import { readPushSubscription } from '../../pubsub'
+import { userRepository } from '../../repository/user'
 import { createPageSaveRequest } from '../../services/create_page_save_request'
-import { deleteLibraryItemsByAdmin } from '../../services/library_item'
+import { enqueuePruneTrashJob } from '../../utils/createTask'
+import { enqueueExpireFoldersJob } from '../../utils/createTask'
 import { logger } from '../../utils/logger'
 
 interface CreateLinkRequestMessage {
@@ -15,35 +15,13 @@ interface CreateLinkRequestMessage {
 }
 
 type PruneMessage = {
-  expireInDays: number
-  folder?: string
-  state?: LibraryItemState
-}
-
-const isPruneMessage = (obj: any): obj is PruneMessage => 'expireInDays' in obj
-
-const getPruneMessage = (msgStr: string): PruneMessage => {
-  try {
-    const obj = JSON.parse(msgStr) as unknown
-    if (isPruneMessage(obj)) {
-      return obj
-    }
-  } catch (err) {
-    console.log('error deserializing event: ', { msgStr, err })
-  }
-
-  // default to prune following folder items older than 30 days
-  return {
-    folder: 'following',
-    expireInDays: 30,
-  }
+  ttlInDays?: number
 }
 
 export function linkServiceRouter() {
   const router = express.Router()
 
   router.post('/create', async (req, res) => {
-    logger.info('create link req', req)
     const { message: msgStr, expired } = readPushSubscription(req)
     logger.info('read pubsub message', { msgStr, expired })
 
@@ -66,12 +44,16 @@ export function linkServiceRouter() {
     }
     const msg = data as CreateLinkRequestMessage
 
+    const user = await userRepository.findById(msg.userId)
+    if (!user) {
+      return res.status(400).send('Bad Request')
+    }
+
     try {
       const request = await createPageSaveRequest({
-        userId: msg.userId,
+        user,
         url: msg.url,
       })
-      logger.info('create link request', request)
 
       res.status(200).send(request)
     } catch (err) {
@@ -80,34 +62,52 @@ export function linkServiceRouter() {
     }
   })
 
-  router.post('/prune', async (req, res) => {
-    logger.info('prune expired items in folder')
-
+  router.post('/pruneTrash', async (req, res) => {
     const { message: msgStr, expired } = readPushSubscription(req)
-
-    if (!msgStr) {
-      return res.status(200).send('Bad Request')
-    }
 
     if (expired) {
       logger.info('discarding expired message')
       return res.status(200).send('Expired')
     }
 
-    const pruneMessage = getPruneMessage(msgStr)
-    const expireTime = pruneMessage.expireInDays * 1000 * 60 * 60 * 24 // convert days to milliseconds
+    // default to prune trash items older than 14 days
+    let ttlInDays = 14
+
+    if (msgStr) {
+      const pruneMessage = JSON.parse(msgStr) as PruneMessage
+
+      if (pruneMessage.ttlInDays) {
+        ttlInDays = pruneMessage.ttlInDays
+      }
+    }
 
     try {
-      const result = await deleteLibraryItemsByAdmin({
-        folder: pruneMessage.folder,
-        state: pruneMessage.state,
-        updatedAt: LessThan(new Date(Date.now() - expireTime)),
-      })
-      logger.info('prune result', result)
+      const job = await enqueuePruneTrashJob(ttlInDays)
+      logger.info('enqueue prune trash job', { id: job?.id })
 
       return res.sendStatus(200)
     } catch (error) {
       logger.error('error prune items', error)
+
+      return res.sendStatus(500)
+    }
+  })
+
+  router.post('/expireFolders', async (req, res) => {
+    const { expired } = readPushSubscription(req)
+
+    if (expired) {
+      logger.info('discarding expired message')
+      return res.status(200).send('Expired')
+    }
+
+    try {
+      const job = await enqueueExpireFoldersJob()
+      logger.info('enqueue job', { id: job?.id })
+
+      return res.sendStatus(200)
+    } catch (error) {
+      logger.error('error expire folders', error)
 
       return res.sendStatus(500)
     }

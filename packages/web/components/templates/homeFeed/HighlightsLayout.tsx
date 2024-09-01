@@ -1,31 +1,31 @@
 import { useRouter } from 'next/router'
-import { HighlighterCircle } from 'phosphor-react'
+import { HighlighterCircle } from '@phosphor-icons/react'
 import { useCallback, useEffect, useReducer, useState } from 'react'
-import { Toaster } from 'react-hot-toast'
 import { Highlight } from '../../../lib/networking/fragments/highlightFragment'
 import {
   LibraryItem,
   LibraryItemNode,
-} from '../../../lib/networking/queries/useGetLibraryItemsQuery'
+} from '../../../lib/networking/library_items/useLibraryItems'
 import { UserBasicData } from '../../../lib/networking/queries/useGetViewerQuery'
 import { showErrorToast, showSuccessToast } from '../../../lib/toastHelpers'
 import { Dropdown, DropdownOption } from '../../elements/DropdownElements'
 
 import { Box, HStack, SpanBox, VStack } from '../../elements/LayoutPrimitives'
 import { MenuTrigger } from '../../elements/MenuTrigger'
-import {
-  MetaStyle,
-  timeAgo,
-} from '../../patterns/LibraryCards/LibraryCardStyles'
+import { MetaStyle } from '../../patterns/LibraryCards/LibraryCardStyles'
+import { timeAgo } from '../../../lib/textFormatting'
 import { LibraryHighlightGridCard } from '../../patterns/LibraryCards/LibraryHighlightGridCard'
 import { NotebookContent } from '../article/Notebook'
 import { EmptyHighlights } from './EmptyHighlights'
-import { DEFAULT_HEADER_HEIGHT, useGetHeaderHeight } from './HeaderSpacer'
 import { highlightsAsMarkdown } from './HighlightItem'
+import { MenuHeaderButton } from './LibraryHeader'
 
 type HighlightItemsLayoutProps = {
   items: LibraryItem[]
   viewer: UserBasicData | undefined
+
+  showFilterMenu: boolean
+  setShowFilterMenu: (show: boolean) => void
 
   gridContainerRef: React.RefObject<HTMLDivElement>
 }
@@ -33,10 +33,8 @@ type HighlightItemsLayoutProps = {
 export function HighlightItemsLayout(
   props: HighlightItemsLayoutProps
 ): JSX.Element {
-  const headerHeight = useGetHeaderHeight()
-  const [currentItem, setCurrentItem] = useState<LibraryItem | undefined>(
-    undefined
-  )
+  const [currentItem, setCurrentItem] =
+    useState<LibraryItem | undefined>(undefined)
 
   const listReducer = (
     state: LibraryItem[],
@@ -106,10 +104,7 @@ export function HighlightItemsLayout(
       <Box
         css={{
           width: '100%',
-          height: `calc(100vh - ${headerHeight})`,
-          '@mdDown': {
-            height: DEFAULT_HEADER_HEIGHT,
-          },
+          height: `100vh`,
         }}
       >
         <EmptyHighlights />
@@ -122,20 +117,16 @@ export function HighlightItemsLayout(
       <HStack
         css={{
           width: '100%',
-          height: `calc(100vh - ${headerHeight})`,
+          height: `100vh`,
           '@lgDown': {
             overflowY: 'scroll',
           },
           bg: '$thBackground2',
           overflow: 'hidden',
-          '@mdDown': {
-            height: DEFAULT_HEADER_HEIGHT,
-          },
         }}
         distribution="start"
         alignment="start"
       >
-        <Toaster />
         <HStack
           css={{
             flexGrow: '0',
@@ -153,7 +144,7 @@ export function HighlightItemsLayout(
         >
           <VStack
             css={{
-              minHeight: `calc(100vh - ${headerHeight})`,
+              minHeight: `100vh`,
               bg: '$thBackground',
             }}
             distribution="start"
@@ -167,8 +158,22 @@ export function HighlightItemsLayout(
                 borderBottom: '1px solid $thBorderColor',
               }}
               alignment="center"
-              distribution="center"
-            ></HStack>
+              distribution="start"
+            >
+              <SpanBox
+                css={{
+                  display: 'none',
+                  '@mdDown': {
+                    display: 'flex',
+                  },
+                }}
+              >
+                <MenuHeaderButton
+                  showFilterMenu={props.showFilterMenu}
+                  setShowFilterMenu={props.setShowFilterMenu}
+                />
+              </SpanBox>
+            </HStack>
             <LibraryItemsList
               items={items}
               viewer={props.viewer}

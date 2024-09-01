@@ -12,7 +12,6 @@
     @EnvironmentObject var dataService: DataService
     @EnvironmentObject var audioController: AudioController
 
-    @Environment(\.colorScheme) private var colorScheme: ColorScheme
     @Environment(\.dismiss) private var dismiss
 
     let delete: (_: NSManagedObjectID) -> Void
@@ -24,9 +23,9 @@
     @State var showLabelsModal = false
     @State var showNotebookView = false
 
-    @State var showOperationToast = false
+    @State var showSnackbar = false
     @State var operationStatus: OperationStatus = .none
-    @State var operationMessage: String?
+    @State var snackbarMessage: String?
 
     var playPauseButtonImage: String {
       switch audioController.state {
@@ -45,7 +44,7 @@
       if audioController.playbackError {
         return AnyView(Color.clear)
       }
-      if let itemID = audioController.itemAudioProperties?.itemID, audioController.isLoadingItem(itemID: itemID) {
+      if audioController.isLoadingItem(audioController.itemAudioProperties) {
         return AnyView(ProgressView())
       } else {
         return AnyView(Button(
@@ -98,11 +97,11 @@
           }
         ).padding(.trailing, 5)
 
-        if !(audioController.itemAudioProperties?.isArchived ?? false) {
+        if !((audioController.itemAudioProperties as? LinkedItemAudioProperties)?.isArchived ?? false) {
           Button(
             action: { performArchive() },
             label: {
-              if audioController.itemAudioProperties?.isArchived ?? false {
+              if (audioController.itemAudioProperties as? LinkedItemAudioProperties)?.isArchived ?? false {
                 Image
                   .toolbarUnarchive
                   .foregroundColor(Color.toolbarItemForeground)
@@ -130,20 +129,20 @@
       }
     }
 
-    func performViewArticle() {
-      if let objectID = audioController.itemAudioProperties?.objectID {
-        viewArticle(objectID)
-      }
-    }
+//    func performViewArticle() {
+//      if let objectID = audioController.itemAudioProperties?.objectID {
+//        viewArticle(objectID)
+//      }
+//    }
 
     func performDelete() {
-      if let objectID = audioController.itemAudioProperties?.objectID {
+      if let objectID = (audioController.itemAudioProperties as? LinkedItemAudioProperties)?.objectID {
         delete(objectID)
       }
     }
 
     func performArchive() {
-      if let objectID = audioController.itemAudioProperties?.objectID {
+      if let objectID = (audioController.itemAudioProperties as? LinkedItemAudioProperties)?.objectID {
         archive(objectID)
       }
     }
@@ -364,8 +363,13 @@
           playbackRateButton(rate: 1.0, title: "1.0×", selected: audioController.playbackRate == 1.0)
           playbackRateButton(rate: 1.1, title: "1.1×", selected: audioController.playbackRate == 1.1)
           playbackRateButton(rate: 1.2, title: "1.2×", selected: audioController.playbackRate == 1.2)
+          playbackRateButton(rate: 1.3, title: "1.3×", selected: audioController.playbackRate == 1.3)
+          playbackRateButton(rate: 1.4, title: "1.4×", selected: audioController.playbackRate == 1.4)
           playbackRateButton(rate: 1.5, title: "1.5×", selected: audioController.playbackRate == 1.5)
+          playbackRateButton(rate: 1.6, title: "1.6×", selected: audioController.playbackRate == 1.6)
           playbackRateButton(rate: 1.7, title: "1.7×", selected: audioController.playbackRate == 1.7)
+          playbackRateButton(rate: 1.8, title: "1.8×", selected: audioController.playbackRate == 1.8)
+          playbackRateButton(rate: 1.9, title: "1.9×", selected: audioController.playbackRate == 1.9)
           playbackRateButton(rate: 2.0, title: "2.0×", selected: audioController.playbackRate == 2.0)
           playbackRateButton(rate: 2.2, title: "2.2×", selected: audioController.playbackRate == 2.2)
           playbackRateButton(rate: 2.5, title: "2.5×", selected: audioController.playbackRate == 2.5)
@@ -384,8 +388,11 @@
 
     func playerContent(_: LinkedItemAudioProperties) -> some View {
       ZStack {
-        WindowLink(level: .alert, transition: .move(edge: .bottom), isPresented: $showOperationToast) {
-          OperationToast(operationMessage: $operationMessage, showOperationToast: $showOperationToast, operationStatus: $operationStatus)
+        WindowLink(level: .alert, transition: .move(edge: .bottom), isPresented: $showSnackbar) {
+          OperationToast(
+            operationMessage: $snackbarMessage,
+            showOperationToast: $showSnackbar,
+            operationStatus: $operationStatus)
             .offset(y: -90)
         } label: {
           EmptyView()
@@ -464,7 +471,7 @@
     }
 
     public var innerBody: some View {
-      if let itemAudioProperties = self.audioController.itemAudioProperties {
+      if let itemAudioProperties = self.audioController.itemAudioProperties as? LinkedItemAudioProperties {
         return AnyView(
           playerContent(itemAudioProperties)
             .tint(.appGrayTextContrast)

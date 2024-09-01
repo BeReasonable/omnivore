@@ -168,6 +168,7 @@ extension DataService {
       try $0.search(
         after: OptionalArgument(cursor),
         first: OptionalArgument(limit),
+        includeContent: OptionalArgument(true),
         query: OptionalArgument(searchQuery),
         selection: selection
       )
@@ -309,7 +310,7 @@ private let syncItemEdgeSelection = Selection.SyncUpdatedItemEdge {
 }
 
 private let searchItemSelection = Selection.SearchItem {
-  InternalLibraryItem(
+  return InternalLibraryItem(
     id: try $0.id(),
     title: try $0.title(),
     createdAt: try $0.createdAt().value ?? Date(),

@@ -1,30 +1,21 @@
 import * as privateIpLib from 'private-ip'
-import { LibraryItemState } from '../entity/library_item'
+import { LibraryItem, LibraryItemState } from '../entity/library_item'
+import { User } from '../entity/user'
 import {
-  ArticleSavingRequest,
   ArticleSavingRequestStatus,
   CreateArticleSavingRequestErrorCode,
   CreateLabelInput,
   PageType,
 } from '../generated/graphql'
 import { createPubSubClient, PubsubClient } from '../pubsub'
-import { userRepository } from '../repository/user'
-import { enqueueParseRequest } from '../utils/createTask'
-import {
-  cleanUrl,
-  generateSlug,
-  libraryItemToArticleSavingRequest,
-} from '../utils/helpers'
+import { redisDataSource } from '../redis_data_source'
+import { enqueueFetchContentJob } from '../utils/createTask'
+import { cleanUrl, generateSlug } from '../utils/helpers'
 import { logger } from '../utils/logger'
-import {
-  countByCreatedAt,
-  createLibraryItem,
-  findLibraryItemByUrl,
-  updateLibraryItem,
-} from './library_item'
+import { createOrUpdateLibraryItem } from './library_item'
 
 interface PageSaveRequest {
-  userId: string
+  user: User
   url: string
   pubsub?: PubsubClient
   articleSavingRequestId?: string
@@ -43,13 +34,49 @@ const SAVING_CONTENT = 'Your link is being saved...'
 
 const isPrivateIP = privateIpLib.default
 
-// 5 articles added in the last minute: use low queue
+const recentSavedItemKey = (userId: string) => `recent-saved-item:${userId}`
+
+const addRecentSavedItem = async (userId: string) => {
+  const redisClient = redisDataSource.redisClient
+
+  if (redisClient) {
+    const key = recentSavedItemKey(userId)
+    try {
+      // add now to the sorted set for rate limiting
+      await redisClient.zadd(key, Date.now(), Date.now())
+    } catch (error) {
+      logger.error('error adding recently saved item in redis', {
+        key,
+        error,
+      })
+    }
+  }
+}
+
+// 5 items saved in the last minute: use low queue
 // default: use normal queue
 const getPriorityByRateLimit = async (
   userId: string
 ): Promise<'low' | 'high'> => {
-  const count = await countByCreatedAt(userId, new Date(Date.now() - 60 * 1000))
-  return count >= 5 ? 'low' : 'high'
+  const redisClient = redisDataSource.redisClient
+  if (redisClient) {
+    const oneMinuteAgo = Date.now() - 60 * 1000
+    const key = recentSavedItemKey(userId)
+
+    try {
+      // Remove items older than one minute
+      await redisClient.zremrangebyscore(key, '-inf', oneMinuteAgo)
+
+      // Count items in the last minute
+      const count = await redisClient.zcard(key)
+
+      return count >= 5 ? 'low' : 'high'
+    } catch (error) {
+      logger.error('Failed to get priority by rate limit', { userId, error })
+    }
+  }
+
+  return 'high'
 }
 
 export const validateUrl = (url: string): URL => {
@@ -80,7 +107,7 @@ export const validateUrl = (url: string): URL => {
 }
 
 export const createPageSaveRequest = async ({
-  userId,
+  user,
   url,
   pubsub = createPubSubClient(),
   articleSavingRequestId,
@@ -93,80 +120,65 @@ export const createPageSaveRequest = async ({
   publishedAt,
   folder,
   subscription,
-}: PageSaveRequest): Promise<ArticleSavingRequest> => {
+}: PageSaveRequest): Promise<LibraryItem> => {
   try {
     validateUrl(url)
   } catch (error) {
-    logger.info('invalid url', { url, error })
-    return Promise.reject({
-      errorCode: CreateArticleSavingRequestErrorCode.BadData,
-    })
-  }
-  // if user is not specified, get it from the database
-  const user = await userRepository.findById(userId)
-  if (!user) {
-    logger.info(`User not found: ${userId}`)
+    logger.error('invalid url', { url, error })
+
     return Promise.reject({
       errorCode: CreateArticleSavingRequestErrorCode.BadData,
     })
   }
 
+  const userId = user.id
   url = cleanUrl(url)
-  // look for existing library item
-  let libraryItem = await findLibraryItemByUrl(url, userId)
-  if (!libraryItem) {
-    logger.info('libraryItem does not exist', { url })
 
-    // create processing item
-    libraryItem = await createLibraryItem(
-      {
-        id: articleSavingRequestId,
-        user: { id: userId },
-        readableContent: SAVING_CONTENT,
-        itemType: PageType.Unknown,
-        slug: generateSlug(url),
-        title: url,
-        originalUrl: url,
-        state: LibraryItemState.Processing,
-        publishedAt,
-        folder,
-        subscription,
-        savedAt,
-      },
-      userId,
-      pubsub
-    )
-  }
-  // reset state to processing
-  if (libraryItem.state !== LibraryItemState.Processing) {
-    libraryItem = await updateLibraryItem(
-      libraryItem.id,
-      {
-        state: LibraryItemState.Processing,
-      },
-      userId,
-      pubsub
-    )
-  }
+  // create processing item
+  const libraryItem = await createOrUpdateLibraryItem(
+    {
+      id: articleSavingRequestId || undefined,
+      user: { id: userId },
+      readableContent: SAVING_CONTENT,
+      itemType: PageType.Unknown,
+      slug: generateSlug(url),
+      title: url,
+      originalUrl: url,
+      state: LibraryItemState.Processing,
+      publishedAt,
+      folder,
+      subscription,
+      savedAt,
+    },
+    userId,
+    pubsub
+  )
+
+  // add to recent saved item
+  await addRecentSavedItem(userId)
 
   // get priority by checking rate limit if not specified
   priority = priority || (await getPriorityByRateLimit(userId))
 
   // enqueue task to parse item
-  await enqueueParseRequest({
+  await enqueueFetchContentJob({
     url,
-    userId,
-    saveRequestId: libraryItem.id,
+    users: [
+      {
+        folder,
+        id: userId,
+        libraryItemId: libraryItem.id,
+      },
+    ],
     priority,
     state,
     labels,
     locale,
     timezone,
-    savedAt,
-    publishedAt,
-    folder,
+    savedAt: savedAt?.toISOString(),
+    publishedAt: publishedAt?.toISOString(),
     rssFeedUrl: subscription,
   })
 
-  return libraryItemToArticleSavingRequest(user, libraryItem)
+  return libraryItem
 }

@@ -14,7 +14,7 @@ struct MacFeedCardNavigationLink: View {
 
   var body: some View {
     ZStack {
-      LibraryItemCard(item: LibraryItemData.make(from: item), viewer: dataService.currentViewer)
+      LibraryItemCard(item: item, viewer: dataService.currentViewer)
       NavigationLink(destination: LinkItemDetailView(
         linkedItemObjectID: item.objectID,
         isPDF: item.isPDF
@@ -29,29 +29,15 @@ struct LibraryItemListNavigationLink: View {
   @EnvironmentObject var dataService: DataService
   @EnvironmentObject var audioController: AudioController
 
-  @ObservedObject var item: Models.LibraryItem
-  @ObservedObject var viewModel: HomeFeedViewModel
+  let item: Models.LibraryItem
+  let viewModel: HomeFeedViewModel
 
   var body: some View {
-    ZStack {
-      LibraryItemCard(item: LibraryItemData.make(from: item), viewer: dataService.currentViewer)
-      PresentationLink(
-        transition: PresentationLinkTransition.slide(
-          options: PresentationLinkTransition.SlideTransitionOptions(edge: .trailing,
-                                                                     options:
-                                                                     PresentationLinkTransition.Options(
-                                                                       modalPresentationCapturesStatusBarAppearance: true
-                                                                     ))),
-        destination: {
-          LinkItemDetailView(
-            linkedItemObjectID: item.objectID,
-            isPDF: item.isPDF
-          )
-        }, label: {
-          EmptyView()
-        }
-      )
-    }
+    Button(action: {
+      viewModel.presentItem(item: item)
+    }, label: {
+      LibraryItemCard(item: item, viewer: dataService.currentViewer)
+    })
   }
 }
 
@@ -65,22 +51,11 @@ struct LibraryItemGridCardNavigationLink: View {
   @ObservedObject var viewModel: HomeFeedViewModel
 
   var body: some View {
-    PresentationLink(
-      transition: PresentationLinkTransition.slide(
-        options: PresentationLinkTransition.SlideTransitionOptions(edge: .trailing,
-                                                                   options:
-                                                                   PresentationLinkTransition.Options(
-                                                                     modalPresentationCapturesStatusBarAppearance: true
-                                                                   ))),
-      destination: {
-        LinkItemDetailView(
-          linkedItemObjectID: item.objectID,
-          isPDF: item.isPDF
-        )
-      }, label: {
-        GridCard(item: LibraryItemData.make(from: item))
-      }
-    )
+    Button(action: {
+      viewModel.presentItem(item: item)
+    }, label: {
+      GridCard(item: item)
+    })
     .buttonStyle(.plain)
     .aspectRatio(1.0, contentMode: .fill)
     .background(Color.systemBackground)
